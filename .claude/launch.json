@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "repo-educator-frontend",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd frontend && flutter run -d web-server --web-port=5173 --web-hostname=127.0.0.1 --dart-define=API_BASE_URL=http://localhost:8000"],
+      "port": 5173
+    }
+  ]
+}

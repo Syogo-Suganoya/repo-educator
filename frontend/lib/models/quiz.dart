@@ -1,3 +1,5 @@
+import 'doc.dart';
+
 class Quiz {
   final String quizId;
   final String filePath;
@@ -65,11 +67,13 @@ class QuizGenerateResponse {
   final String repositoryId;
   final String url;
   final List<FeatureSection> sections;
+  final List<DocEntry> docs;
 
   QuizGenerateResponse({
     required this.repositoryId,
     required this.url,
     required this.sections,
+    this.docs = const [],
   });
 
   factory QuizGenerateResponse.fromJson(Map<String, dynamic> json) {
@@ -78,6 +82,10 @@ class QuizGenerateResponse {
       url: json['url'] as String,
       sections: (json['sections'] as List)
           .map((s) => FeatureSection.fromJson(s as Map<String, dynamic>))
+          .toList(),
+      // docs を返さない古いバックエンドに繋いでも壊れないよう既定値を持たせる。
+      docs: (json['docs'] as List? ?? [])
+          .map((d) => DocEntry.fromJson(d as Map<String, dynamic>))
           .toList(),
     );
   }

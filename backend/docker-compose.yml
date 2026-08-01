@@ -5,6 +5,10 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
+      - ./tests:/app/tests
     env_file:
       - .env
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # 開発コンテナではテスト用の依存も入れておく（本番イメージには含めない）。
+    command: >
+      sh -c "pip install -q -r requirements-dev.txt &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"

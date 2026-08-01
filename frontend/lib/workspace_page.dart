@@ -1,16 +1,35 @@
 import 'package:flutter/material.dart';
 
+import 'api_client.dart';
+import 'docs/docs_view.dart';
+import 'models/doc.dart';
 import 'models/quiz.dart';
 import 'theme.dart';
+
+/// ワークスペース内の表示モード。
+/// レビュー（クイズ）と、逆引きドキュメントを行き来する。
+enum WorkspaceTab { review, docs }
 
 /// セクション一覧を左サイドバーに、選択中セクションのレビューを右側に表示する
 /// ワークスペース画面。ユーザーはサイドバーから狙った機能セクションへ
 /// いつでもピンポイントに切り替えられる。
 class WorkspacePage extends StatefulWidget {
-  const WorkspacePage({super.key, required this.repositoryUrl, required this.sections});
+  const WorkspacePage({
+    super.key,
+    required this.repositoryUrl,
+    required this.repositoryId,
+    required this.sections,
+    required this.apiClient,
+    this.docs = const [],
+    this.initialTab = WorkspaceTab.review,
+  });
 
   final String repositoryUrl;
+  final String repositoryId;
   final List<FeatureSection> sections;
+  final ApiClient apiClient;
+  final List<DocEntry> docs;
+  final WorkspaceTab initialTab;
 
   @override
   State<WorkspacePage> createState() => _WorkspacePageState();
@@ -24,6 +43,7 @@ class _SectionProgress {
 class _WorkspacePageState extends State<WorkspacePage> {
   int? _selectedIndex;
   final Map<int, _SectionProgress> _progress = {};
+  late WorkspaceTab _tab = widget.initialTab;
 
   _SectionProgress _progressFor(int sectionIndex) => _progress.putIfAbsent(sectionIndex, () => _SectionProgress());
 
@@ -31,10 +51,28 @@ class _WorkspacePageState extends State<WorkspacePage> {
     setState(() => _selectedIndex = index);
   }
 
+  /// ドキュメントから対応するクイズセクションへ飛ぶ。
+  /// セクション名が一致しない場合は何もしない（生成結果が食い違うことがあるため）。
+  void _openSectionByTitle(String sectionTitle) {
+    final index = widget.sections.indexWhere((s) => s.title == sectionTitle);
+    if (index < 0) return;
+    setState(() {
+      _tab = WorkspaceTab.review;
+      _selectedIndex = index;
+    });
+  }
+
   void _selectAnswer(int sectionIndex, Quiz quiz, String choice) {
     final progress = _progressFor(sectionIndex);
     if (progress.answers.containsKey(quiz.quizId)) return;
     setState(() => progress.answers[quiz.quizId] = choice);
+
+    // 学習履歴の記録。未ログインなら送信自体がスキップされる。
+    widget.apiClient.recordAnswer(
+      repositoryId: widget.repositoryId,
+      quizId: quiz.quizId,
+      correct: choice == quiz.correctAnswer,
+    );
   }
 
   void _next(int sectionIndex) {
@@ -60,49 +98,137 @@ class _WorkspacePageState extends State<WorkspacePage> {
         onBack: () => Navigator.of(context).pop(),
         trailing: Text(widget.repositoryUrl, style: appMono(12, color: AppPalette.inkMuted), overflow: TextOverflow.ellipsis),
       ),
-      body: isNarrow
-          ? Column(
-              children: [
-                _SectionSidebar(
-                  sections: widget.sections,
-                  selectedIndex: _selectedIndex,
-                  progress: _progress,
-                  horizontal: true,
-                  onSelect: _selectSection,
-                ),
-                Expanded(
-                  child: _MainContent(
-                    sections: widget.sections,
-                    selectedIndex: _selectedIndex,
-                    progress: _progress,
-                    onSelectAnswer: _selectAnswer,
-                    onNext: _next,
-                    onRetry: _retry,
-                  ),
-                ),
-              ],
-            )
-          : Row(
-              children: [
-                _SectionSidebar(
-                  sections: widget.sections,
-                  selectedIndex: _selectedIndex,
-                  progress: _progress,
-                  horizontal: false,
-                  onSelect: _selectSection,
-                ),
-                Expanded(
-                  child: _MainContent(
-                    sections: widget.sections,
-                    selectedIndex: _selectedIndex,
-                    progress: _progress,
-                    onSelectAnswer: _selectAnswer,
-                    onNext: _next,
-                    onRetry: _retry,
-                  ),
-                ),
-              ],
+      body: Column(
+        children: [
+          _WorkspaceTabBar(
+            current: _tab,
+            docCount: widget.docs.length,
+            onSelect: (tab) => setState(() => _tab = tab),
+          ),
+          Expanded(
+            child: _tab == WorkspaceTab.docs
+                ? DocsView(docs: widget.docs, onOpenSection: _openSectionByTitle)
+                : _reviewBody(isNarrow),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _reviewBody(bool isNarrow) {
+    final sidebar = _SectionSidebar(
+      sections: widget.sections,
+      selectedIndex: _selectedIndex,
+      progress: _progress,
+      horizontal: isNarrow,
+      onSelect: _selectSection,
+    );
+    final content = _MainContent(
+      sections: widget.sections,
+      selectedIndex: _selectedIndex,
+      progress: _progress,
+      onSelectAnswer: _selectAnswer,
+      onNext: _next,
+      onRetry: _retry,
+    );
+
+    return isNarrow
+        ? Column(children: [sidebar, Expanded(child: content)])
+        : Row(children: [sidebar, Expanded(child: content)]);
+  }
+}
+
+/// 「レビュー / ドキュメント」の切替。
+class _WorkspaceTabBar extends StatelessWidget {
+  const _WorkspaceTabBar({
+    required this.current,
+    required this.docCount,
+    required this.onSelect,
+  });
+
+  final WorkspaceTab current;
+  final int docCount;
+  final void Function(WorkspaceTab) onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppPalette.bg,
+        border: Border(bottom: BorderSide(color: AppPalette.line)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Row(
+        children: [
+          _TabButton(
+            label: 'レビュー',
+            icon: Icons.difference_outlined,
+            selected: current == WorkspaceTab.review,
+            onTap: () => onSelect(WorkspaceTab.review),
+          ),
+          const SizedBox(width: 4),
+          _TabButton(
+            label: 'ドキュメント',
+            icon: Icons.menu_book_outlined,
+            badge: docCount > 0 ? '$docCount' : null,
+            selected: current == WorkspaceTab.docs,
+            onTap: () => onSelect(WorkspaceTab.docs),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabButton extends StatelessWidget {
+  const _TabButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+    this.badge,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  final String? badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? AppPalette.accent : AppPalette.inkMuted;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: selected ? AppPalette.accent : Colors.transparent,
+                width: 2,
+              ),
             ),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 15, color: color),
+              const SizedBox(width: 7),
+              Text(label, style: appMono(12.5, color: color, weight: FontWeight.w700)),
+              if (badge != null) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  color: selected ? AppPalette.accentSoft : AppPalette.surfaceSunken,
+                  child: Text(badge!, style: appMono(10, color: color, weight: FontWeight.w700)),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

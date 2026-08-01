@@ -115,7 +115,6 @@ async def generate_quizzes(
     if not settings.vertex_ai_configured:
         return generate_mock_sections(files, num_questions)
 
-    from google.cloud import aiplatform  # noqa: F401
     from vertexai.generative_models import GenerationConfig, GenerativeModel
     import vertexai
 
@@ -125,7 +124,9 @@ async def generate_quizzes(
         system_instruction=SYSTEM_INSTRUCTION,
     )
     prompt = _build_prompt(files, num_questions, focus_language)
-    response = model.generate_content(
+    # 同期版の generate_content はイベントループをブロックし、
+    # ドキュメント生成との並行実行ができなくなるため async 版を使う。
+    response = await model.generate_content_async(
         prompt,
         generation_config=GenerationConfig(
             response_mime_type="application/json",

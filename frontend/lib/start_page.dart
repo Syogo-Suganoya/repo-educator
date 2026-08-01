@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
 import 'api_client.dart';
+import 'auth/account_button.dart';
+import 'auth/auth_service.dart';
 import 'models/quiz.dart';
+import 'repositories_page.dart';
 import 'theme.dart';
 import 'workspace_page.dart';
 
@@ -55,7 +58,8 @@ class StartPage extends StatefulWidget {
 }
 
 class _StartPageState extends State<StartPage> {
-  final _apiClient = ApiClient();
+  final _authService = AuthService();
+  late final _apiClient = ApiClient(authService: _authService);
   final _urlController = TextEditingController();
   final _branchController = TextEditingController(text: 'main');
 
@@ -66,10 +70,29 @@ class _StartPageState extends State<StartPage> {
   void dispose() {
     _urlController.dispose();
     _branchController.dispose();
+    _authService.dispose();
     super.dispose();
   }
 
-  Future<void> _openPr({String? url, String? branch}) async {
+  void _openRepositories() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RepositoriesPage(
+          apiClient: _apiClient,
+          onPick: (repository) {
+            Navigator.of(context).pop();
+            _openPr(url: repository.htmlUrl, branch: repository.defaultBranch);
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openPr({
+    String? url,
+    String? branch,
+    WorkspaceTab tab = WorkspaceTab.review,
+  }) async {
     final repositoryUrl = (url ?? _urlController.text).trim();
     final repositoryBranch = (branch ?? _branchController.text).trim();
     if (repositoryUrl.isEmpty) {
@@ -88,7 +111,7 @@ class _StartPageState extends State<StartPage> {
         branch: repositoryBranch.isEmpty ? 'main' : repositoryBranch,
       );
       if (!mounted) return;
-      _openSections(result);
+      _openSections(result, tab);
     } on QuizApiException catch (e) {
       setState(() => _errorMessage = e.toUserMessage());
     } catch (_) {
@@ -98,10 +121,17 @@ class _StartPageState extends State<StartPage> {
     }
   }
 
-  void _openSections(QuizGenerateResponse result) {
+  void _openSections(QuizGenerateResponse result, WorkspaceTab tab) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => WorkspacePage(repositoryUrl: result.url, sections: result.sections),
+        builder: (_) => WorkspacePage(
+          repositoryUrl: result.url,
+          repositoryId: result.repositoryId,
+          sections: result.sections,
+          docs: result.docs,
+          apiClient: _apiClient,
+          initialTab: tab,
+        ),
       ),
     );
   }
@@ -119,7 +149,13 @@ class _StartPageState extends State<StartPage> {
 
     return Scaffold(
       backgroundColor: AppPalette.bg,
-      appBar: const AppTopBar(),
+      appBar: AppTopBar(
+        trailing: AccountButton(
+          authService: _authService,
+          apiClient: _apiClient,
+          onChanged: () => setState(() {}),
+        ),
+      ),
       body: SingleChildScrollView(
         child: Center(
           child: ConstrainedBox(
@@ -136,7 +172,13 @@ class _StartPageState extends State<StartPage> {
                     loading: _loading,
                     errorMessage: _errorMessage,
                     onSubmit: () => _openPr(),
+                    onOpenDocs: () => _openPr(tab: WorkspaceTab.docs),
                   ),
+                  // ログイン済みのときだけ現れる導線。未ログインの画面は従来のまま。
+                  if (_authService.isSignedIn) ...[
+                    const SizedBox(height: 16),
+                    _PrivateReposEntry(onOpen: _openRepositories),
+                  ],
                   SizedBox(height: isNarrow ? 48 : 72),
                   _Lifecycle(isNarrow: isNarrow),
                   SizedBox(height: isNarrow ? 48 : 72),
@@ -161,6 +203,7 @@ class _Hero extends StatelessWidget {
     required this.loading,
     required this.errorMessage,
     required this.onSubmit,
+    required this.onOpenDocs,
   });
 
   final bool isNarrow;
@@ -169,6 +212,7 @@ class _Hero extends StatelessWidget {
   final bool loading;
   final String? errorMessage;
   final VoidCallback onSubmit;
+  final VoidCallback onOpenDocs;
 
   @override
   Widget build(BuildContext context) {
@@ -220,6 +264,23 @@ class _Hero extends StatelessWidget {
                       : Text('プルリクエストを開く', style: appDisplay(14, color: Colors.white, weight: FontWeight.w700)),
                 ),
               ),
+              const SizedBox(height: 10),
+              // クイズをやらずに「調べたいだけ」の入り口。同じ解析結果を
+              // ドキュメントタブで開くだけなので、追加のAPI呼び出しは発生しない。
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: loading ? null : onOpenDocs,
+                  icon: const Icon(Icons.menu_book_outlined, size: 16),
+                  label: Text('ドキュメントを見る', style: appMono(12.5, weight: FontWeight.w700)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppPalette.accent,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                    side: const BorderSide(color: AppPalette.line),
+                  ),
+                ),
+              ),
               if (errorMessage != null) ...[
                 const SizedBox(height: 12),
                 Container(
@@ -233,6 +294,41 @@ class _Hero extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// ログイン済みユーザーだけに見せる、自分のリポジトリへの導線。
+class _PrivateReposEntry extends StatelessWidget {
+  const _PrivateReposEntry({required this.onOpen});
+
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onOpen,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(border: Border.all(color: AppPalette.line)),
+          child: Row(
+            children: [
+              const Icon(Icons.lock_outline, size: 15, color: AppPalette.accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '自分のプライベートリポジトリから選ぶ',
+                  style: appMono(12.5, color: AppPalette.accent, weight: FontWeight.w700),
+                ),
+              ),
+              const Icon(Icons.arrow_forward, size: 14, color: AppPalette.accent),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
