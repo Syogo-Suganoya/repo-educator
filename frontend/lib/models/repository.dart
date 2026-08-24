@@ -1,4 +1,4 @@
-/// GitHub App でアクセスを許可されたリポジトリ1件。
+/// 保存済みのPersonal Access Tokenでアクセスできるリポジトリ1件。
 class RepositorySummary {
   final String fullName;
   final String htmlUrl;
@@ -28,17 +28,13 @@ class RepositorySummary {
   }
 }
 
-/// ログイン中のアカウントとGitHub連携の状態。
+/// ログイン中のアカウントとGitHubトークンの状態。
 class AccountInfo {
   final String? githubLogin;
-  final int installationCount;
-  final bool githubAppAvailable;
+  final bool hasGithubToken;
 
   const AccountInfo({
     this.githubLogin,
-    this.installationCount = 0,
-    this.githubAppAvailable = false,
+    this.hasGithubToken = false,
   });
-
-  bool get hasInstallations => installationCount > 0;
 }

@@ -1,9 +1,14 @@
-"""Cloud KMS による GitHub ユーザートークンの暗号化・復号。
+"""GitHub Personal Access Token の暗号化・復号。
 
-保存するのは GitHub の「ユーザートークン」のみ。リポジトリ本体へのアクセスに使う
-installation access token は都度発行の短命トークンなので保存しない（github_app.py 参照）。
+ユーザーが自分で発行し、設定画面から入力した PAT を保存する用途のみに使う。
+環境変数としてサーバに焼き込むトークンは扱わない（1ユーザー1トークンとして
+DBに保存し、ログアウト後も残る）。
 
-KMS_KEY_NAME が未設定のローカル開発では、暗号化できないトークンを平文で保存する
+Cloud KMSではなく `cryptography.fernet` によるアプリ側の対称鍵暗号化を使う。
+認証基盤全体をGCPから切り離した（Firebase Auth → 自前JWT、Firestore → Postgres）
+のに合わせ、暗号化だけGCP依存を残す理由がないため。
+
+ENCRYPTION_KEY が未設定のローカル開発では、暗号化できないトークンを平文で保存する
 くらいなら保存しない方がよいため、encrypt は None を返す。
 """
 
@@ -13,44 +18,38 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = None
+_fernet = None
 
 
-def kms_configured() -> bool:
-    return bool(settings.kms_key_name)
+def encryption_configured() -> bool:
+    return bool(settings.encryption_key)
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        from google.cloud import kms
+def _get_fernet():
+    global _fernet
+    if _fernet is None:
+        from cryptography.fernet import Fernet
 
-        _client = kms.KeyManagementServiceClient()
-    return _client
+        _fernet = Fernet(settings.encryption_key.encode("utf-8"))
+    return _fernet
 
 
 def encrypt(plaintext: str) -> bytes | None:
-    """暗号文を返す。KMS未設定なら None（＝保存しない）。"""
-    if not plaintext or not kms_configured():
+    """暗号文を返す。暗号化鍵が未設定なら None（＝保存しない）。"""
+    if not plaintext or not encryption_configured():
         return None
     try:
-        response = _get_client().encrypt(
-            request={"name": settings.kms_key_name, "plaintext": plaintext.encode("utf-8")}
-        )
-        return response.ciphertext
+        return _get_fernet().encrypt(plaintext.encode("utf-8"))
     except Exception as e:
-        logger.warning("KMS encrypt failed: %s", type(e).__name__)
+        logger.warning("Encryption failed: %s", type(e).__name__)
         return None
 
 
 def decrypt(ciphertext: bytes | None) -> str | None:
-    if not ciphertext or not kms_configured():
+    if not ciphertext or not encryption_configured():
         return None
     try:
-        response = _get_client().decrypt(
-            request={"name": settings.kms_key_name, "ciphertext": bytes(ciphertext)}
-        )
-        return response.plaintext.decode("utf-8")
+        return _get_fernet().decrypt(bytes(ciphertext)).decode("utf-8")
     except Exception as e:
-        logger.warning("KMS decrypt failed: %s", type(e).__name__)
+        logger.warning("Decryption failed: %s", type(e).__name__)
         return None

@@ -1,6 +1,6 @@
 """デモ用のキュレーション済み逆引きドキュメント。
 
-sample_quizzes.py と対になる。Vertex AI 未接続でも、実コードを人手で読んで書いた
+sample_quizzes.py と対になる。Gemini未接続でも、実コードを人手で読んで書いた
 質の高いドキュメントが返るようにして、GCPなしでも機能をひと通り確認できるようにする。
 
 `related_section_titles` は sample_quizzes.py のセクション名と一致させてあり、

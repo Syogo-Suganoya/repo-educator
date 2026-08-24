@@ -67,6 +67,12 @@ class _StartPageState extends State<StartPage> {
   String? _errorMessage;
 
   @override
+  void initState() {
+    super.initState();
+    _authService.restore();
+  }
+
+  @override
   void dispose() {
     _urlController.dispose();
     _branchController.dispose();

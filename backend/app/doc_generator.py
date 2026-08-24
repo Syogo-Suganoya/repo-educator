@@ -7,10 +7,10 @@ quiz_generator.py と対になるモジュール。同じソースコードか�
 1回の呼び出しに詰め込むと出力トークン上限でJSONが途中で切れやすいため。
 """
 
-import json
 import uuid
 
 from app.config import settings
+from app.gemini import generate_json
 from app.schemas import CodeRef, DocEntry
 
 SYSTEM_INSTRUCTION = """\
@@ -96,14 +96,14 @@ def _build_prompt(files: list[dict[str, str]], focus_language: str | None) -> st
 
 
 def generate_mock_docs(files: list[dict[str, str]]) -> list[DocEntry]:
-    """Vertex AI未接続時のフォールバック。
+    """Gemini未接続時のフォールバック。
 
     実コードの内容は反映しないが、4種類の kind が揃った状態で画面を確認できるようにする。
     """
     sample_files = files or [{"path": "sample.py", "content": "def add(a, b):\n    return a + b"}]
     first = sample_files[0]
     file_name = first["path"].split("/")[-1]
-    mock_note = "（これはVertex AI未接続時のモック応答です）"
+    mock_note = "（これはGemini未接続時のモック応答です）"
 
     return [
         DocEntry(
@@ -112,7 +112,7 @@ def generate_mock_docs(files: list[dict[str, str]]) -> list[DocEntry]:
             title="サンプル機能",
             summary=f"このリポジトリの主要な処理をまとめた仮のエントリです。{mock_note}",
             body=(
-                f"Vertex AI に接続されていないため、実際のコード解析は行われていません。\n\n"
+                f"Geminiに接続されていないため、実際のコード解析は行われていません。\n\n"
                 f"接続すると、ここには `{first['path']}` を含む実装の仕組みと設計意図が表示されます。"
             ),
             file_paths=[f["path"] for f in sample_files[:5]],
@@ -131,7 +131,7 @@ def generate_mock_docs(files: list[dict[str, str]]) -> list[DocEntry]:
             kind="symbol",
             title="add()",
             summary=f"2つの引数を加算して返す関数です。{mock_note}",
-            body="Vertex AI 接続時には、リポジトリ内の実際の関数・クラスがここに並びます。",
+            body="Gemini接続時には、リポジトリ内の実際の関数・クラスがここに並びます。",
             file_paths=[first["path"]],
             symbols=["add"],
             tags=["add", "加算", "関数", "function", "サンプル"],
@@ -149,7 +149,7 @@ def generate_mock_docs(files: list[dict[str, str]]) -> list[DocEntry]:
             title="新しい機能を追加するには",
             summary=f"変更の起点になるファイルを見つける手順の仮エントリです。{mock_note}",
             body=(
-                "Vertex AI 接続時には、実務でよくある作業（エンドポイント追加、"
+                "Gemini接続時には、実務でよくある作業（エンドポイント追加、"
                 "設定項目の追加など）ごとに、どのファイルから読み始めればよいかが表示されます。"
             ),
             file_paths=[f["path"] for f in sample_files[:3]],
@@ -160,7 +160,7 @@ def generate_mock_docs(files: list[dict[str, str]]) -> list[DocEntry]:
             kind="file",
             title=file_name,
             summary=f"`{first['path']}` の概要を示す仮エントリです。{mock_note}",
-            body="Vertex AI 接続時には、各ソースファイルが何を担っているかの要約が表示されます。",
+            body="Gemini接続時には、各ソースファイルが何を担っているかの要約が表示されます。",
             file_paths=[first["path"]],
             tags=[file_name, "ファイル", "file", "概要"],
         ),
@@ -170,25 +170,17 @@ def generate_mock_docs(files: list[dict[str, str]]) -> list[DocEntry]:
 async def generate_docs(
     files: list[dict[str, str]], focus_language: str | None = None
 ) -> list[DocEntry]:
-    if not settings.vertex_ai_configured:
+    if not settings.gemini_configured:
         return generate_mock_docs(files)
 
-    from vertexai.generative_models import GenerationConfig, GenerativeModel
-    import vertexai
-
-    vertexai.init(project=settings.gcp_project, location=settings.gcp_location)
-    model = GenerativeModel("gemini-1.5-flash", system_instruction=SYSTEM_INSTRUCTION)
-
-    response = await model.generate_content_async(
-        _build_prompt(files, focus_language),
-        generation_config=GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=DOC_RESPONSE_SCHEMA,
-            max_output_tokens=8192,
-        ),
+    payload = await generate_json(
+        system_instruction=SYSTEM_INSTRUCTION,
+        prompt=_build_prompt(files, focus_language),
+        response_schema=DOC_RESPONSE_SCHEMA,
+        # 4種類の索引を一度に生成するため出力が長くなりやすい。
+        max_output_tokens=8192,
     )
 
-    payload = json.loads(response.text)
     docs: list[DocEntry] = []
     for entry in payload.get("docs", []):
         code_refs = [CodeRef(**ref) for ref in entry.pop("code_refs", [])]

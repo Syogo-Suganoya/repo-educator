@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import 'api_client.dart';
+import 'auth/github_token_dialog.dart';
 import 'models/repository.dart';
 import 'theme.dart';
 
-/// GitHub App でアクセスを許可したリポジトリの一覧。
-/// まだ1つも許可していないユーザーには、インストール導線だけを見せる。
+/// 保存済みのGitHub Personal Access Tokenでアクセスできるリポジトリの一覧。
+/// トークンが未設定のユーザーには、入力ダイアログへの導線だけを見せる。
 class RepositoriesPage extends StatefulWidget {
   const RepositoriesPage({
     super.key,
@@ -25,6 +25,7 @@ class _RepositoriesPageState extends State<RepositoriesPage> {
   bool _loading = true;
   String? _errorMessage;
   List<RepositorySummary> _repositories = [];
+  AccountInfo _account = const AccountInfo();
 
   @override
   void initState() {
@@ -38,6 +39,12 @@ class _RepositoriesPageState extends State<RepositoriesPage> {
       _errorMessage = null;
     });
     try {
+      final account = await widget.apiClient.fetchMe();
+      if (!mounted) return;
+      setState(() => _account = account);
+
+      if (!account.hasGithubToken) return;
+
       final repositories = await widget.apiClient.fetchRepositories();
       if (!mounted) return;
       setState(() => _repositories = repositories);
@@ -52,16 +59,15 @@ class _RepositoriesPageState extends State<RepositoriesPage> {
     }
   }
 
-  Future<void> _openInstallPage() async {
-    try {
-      final url = await widget.apiClient.fetchInstallUrl();
-      await launchUrl(Uri.parse(url), webOnlyWindowName: '_blank');
-    } on QuizApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _errorMessage = e.toUserMessage());
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _errorMessage = 'インストールURLを取得できませんでした。');
+  Future<void> _openTokenDialog() async {
+    final updated = await GithubTokenDialog.show(
+      context,
+      apiClient: widget.apiClient,
+      account: _account,
+    );
+    if (updated != null) {
+      setState(() => _account = updated);
+      await _load();
     }
   }
 
@@ -91,8 +97,8 @@ class _RepositoriesPageState extends State<RepositoriesPage> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'GitHubで許可したリポジトリだけがここに並びます。'
-                    'プライベートリポジトリも、選んだものだけを読み取ります。',
+                    'GitHub Personal Access Token を保存すると、'
+                    'プライベートリポジトリも含めて一覧から選べます。',
                     style: appBody(15, color: AppPalette.inkMuted, height: 1.8),
                   ),
                   const SizedBox(height: 20),
@@ -101,10 +107,10 @@ class _RepositoriesPageState extends State<RepositoriesPage> {
                   Row(
                     children: [
                       OutlinedButton.icon(
-                        onPressed: _openInstallPage,
-                        icon: const Icon(Icons.add, size: 16),
+                        onPressed: _openTokenDialog,
+                        icon: const Icon(Icons.key_outlined, size: 16),
                         label: Text(
-                          'リポジトリを追加・変更',
+                          _account.hasGithubToken ? 'トークンを変更' : 'トークンを設定',
                           style: appMono(12.5, weight: FontWeight.w700),
                         ),
                         style: OutlinedButton.styleFrom(
@@ -137,6 +143,8 @@ class _RepositoriesPageState extends State<RepositoriesPage> {
                       padding: EdgeInsets.symmetric(vertical: 40),
                       child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
                     )
+                  else if (!_account.hasGithubToken)
+                    _NoTokenState(onOpenDialog: _openTokenDialog)
                   else if (_repositories.isEmpty)
                     const _EmptyState()
                   else
@@ -189,6 +197,47 @@ class _PrivacyNotice extends StatelessWidget {
   }
 }
 
+class _NoTokenState extends StatelessWidget {
+  const _NoTokenState({required this.onOpenDialog});
+
+  final VoidCallback onOpenDialog;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 20),
+      decoration: BoxDecoration(border: Border.all(color: AppPalette.line)),
+      child: Column(
+        children: [
+          const Icon(Icons.key_outlined, size: 28, color: AppPalette.inkMuted),
+          const SizedBox(height: 12),
+          Text(
+            'GitHubトークンが未設定です',
+            style: appDisplay(15, weight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'プライベートリポジトリを読むには、読み取り権限のあるPersonal Access Tokenが必要です。',
+            style: appBody(13.5, color: AppPalette.inkMuted, height: 1.7),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: onOpenDialog,
+            style: FilledButton.styleFrom(
+              backgroundColor: AppPalette.accent,
+              foregroundColor: Colors.white,
+              shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+            ),
+            child: Text('トークンを設定', style: appMono(12.5, color: Colors.white, weight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
 
@@ -201,12 +250,12 @@ class _EmptyState extends StatelessWidget {
       child: Column(
         children: [
           Text(
-            'まだ許可されたリポジトリがありません',
+            'アクセスできるリポジトリが見つかりませんでした',
             style: appDisplay(15, weight: FontWeight.w700),
           ),
           const SizedBox(height: 10),
           Text(
-            '「リポジトリを追加・変更」から、学習したいリポジトリを選んでください。',
+            'トークンの権限（repo スコープなど）を確認してください。',
             style: appBody(13.5, color: AppPalette.inkMuted, height: 1.7),
             textAlign: TextAlign.center,
           ),

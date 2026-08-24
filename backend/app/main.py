@@ -4,21 +4,31 @@ import time
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
 
-from app import analysis_cache, github_app, store
+from app import analysis_cache, store
 from app.analysis_cache import AnalysisResult
-from app.auth import AuthUser, optional_user, require_user
+from app.auth import (
+    AuthUser,
+    create_access_token,
+    hash_password,
+    optional_user,
+    require_user,
+    verify_password,
+)
 from app.config import settings
+from app.db import init_models
 from app.github_client import (
+    InvalidTokenError,
     RateLimitedError,
     RepositoryAccessDeniedError,
     RepositoryNotFoundError,
     RepositoryRef,
     fetch_repository_files,
     fetch_repository_meta,
+    list_my_repositories,
     parse_repository_url,
     resolve_commit_sha,
+    verify_user_token,
 )
 from app.doc_generator import generate_docs
 from app.quiz_generator import generate_quizzes
@@ -26,15 +36,17 @@ from app.sample_docs import get_sample_docs
 from app.sample_quizzes import get_sample_sections
 from app.schemas import (
     AnswerRequest,
-    InstallUrlResponse,
-    LinkGithubRequest,
-    LinkGithubResponse,
+    AuthResponse,
+    GithubTokenStatusResponse,
+    LoginRequest,
     MeResponse,
     ProgressResponse,
     QuizGenerateRequest,
     QuizGenerateResponse,
+    RegisterRequest,
     RepositoryListResponse,
     RepositorySummary,
+    SaveGithubTokenRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +59,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    await init_models()
 
 
 @app.get("/healthz")
@@ -68,7 +85,7 @@ async def generate_quiz(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    if not settings.vertex_ai_configured:
+    if not settings.gemini_configured:
         sample_sections = get_sample_sections(owner, repo)
         if sample_sections is not None:
             return QuizGenerateResponse(
@@ -78,19 +95,15 @@ async def generate_quiz(
                 docs=get_sample_docs(owner, repo) or [],
             )
 
-    # ログイン済みなら、そのユーザーのインストールから当該リポジトリ用のトークンを発行する。
-    installation_token: str | None = None
-    if user is not None and github_app.app_configured():
-        installation_ids = store.get_installations(user.uid)
-        if installation_ids:
-            installation_token = await github_app.find_installation_token_for_repo(
-                installation_ids, owner, repo
-            )
+    # ログイン済みなら、本人が設定画面で保存したPATを使う（サーバ共有の環境変数とは別物）。
+    user_token: str | None = None
+    if user is not None:
+        user_token = await store.load_github_user_token(user.uid)
 
     # まずリポジトリの最終push時刻だけを見る（GitHub API 1回）。
     # 前回と変化がなければ、コミットSHAの問い合わせもソースの取得も省ける。
     try:
-        ref = await _resolve_ref(owner, repo, request.branch, installation_token)
+        ref = await _resolve_ref(owner, repo, request.branch, user_token)
     except RepositoryNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except RepositoryAccessDeniedError as e:
@@ -100,9 +113,9 @@ async def generate_quiz(
 
     key = analysis_cache.cache_key(owner, repo, ref.commit_sha)
     repository_id = key
-    caller_has_access = installation_token is not None
+    caller_has_access = user_token is not None
 
-    cached = _lookup_cache(owner, repo, ref.commit_sha, key)
+    cached = await _lookup_cache(owner, repo, ref.commit_sha, key)
     if cached is not None:
         _ensure_can_read(cached, caller_has_access=caller_has_access)
         sections = cached.sections_for(request.num_questions)
@@ -121,7 +134,7 @@ async def generate_quiz(
         return await _analyze(
             ref=ref,
             branch=request.branch,
-            token=installation_token,
+            token=user_token,
             url=request.repository_url,
             num_questions=request.num_questions,
             focus_language=request.focus_language,
@@ -152,7 +165,8 @@ async def generate_quiz(
 def _rate_limit_message(error: RateLimitedError) -> str:
     """レートリミットの解除時刻を分単位で伝える。
 
-    未認証は60req/hしかないため、GITHUB_TOKEN の設定を促す一文も添える。
+    未認証は60req/hしかない。ログインして自分のPATを設定画面から登録すると
+    5,000req/hになるため、フロント側はこの案内と合わせてトークン入力欄へ誘導できる。
     """
     if error.reset_epoch:
         minutes = max(1, (error.reset_epoch - int(time.time()) + 59) // 60)
@@ -176,7 +190,7 @@ async def _resolve_ref(
     meta = await fetch_repository_meta(owner, repo, branch, token)
     hkey = analysis_cache.head_key(owner, repo, branch)
 
-    known = analysis_cache.head_memory_get(hkey) or store.get_head(owner, repo, branch)
+    known = analysis_cache.head_memory_get(hkey) or await store.get_head(owner, repo, branch)
     if analysis_cache.is_unchanged(known, meta.pushed_at):
         logger.info("No push since last check; reusing commit %s", known.commit_sha[:8])
         return RepositoryRef(
@@ -186,7 +200,7 @@ async def _resolve_ref(
     commit_sha = await resolve_commit_sha(owner, repo, branch, token)
     head = analysis_cache.HeadRef(commit_sha=commit_sha, pushed_at=meta.pushed_at)
     analysis_cache.head_memory_put(hkey, head)
-    store.save_head(owner, repo, branch, head)
+    await store.save_head(owner, repo, branch, head)
 
     if known is not None and known.commit_sha == commit_sha:
         # 他のブランチへのpushだった。対象ブランチは動いていないので再生成は不要。
@@ -195,28 +209,28 @@ async def _resolve_ref(
     return RepositoryRef(owner=owner, repo=repo, commit_sha=commit_sha, private=meta.private)
 
 
-def _lookup_cache(
+async def _lookup_cache(
     owner: str, repo: str, commit_sha: str, key: str
 ) -> AnalysisResult | None:
-    """メモリ → Firestore の順にキャッシュを探す。"""
+    """メモリ → DB の順にキャッシュを探す。"""
     hit = analysis_cache.memory_get(key)
     if hit is not None:
         logger.info("Analysis cache hit (memory): %s", key)
         return hit
 
-    hit = store.get_cached_analysis(owner, repo, commit_sha)
+    hit = await store.get_cached_analysis(owner, repo, commit_sha)
     if hit is not None:
-        logger.info("Analysis cache hit (firestore): %s", key)
-        # 次回以降はFirestoreの読み取りも省けるようメモリにも載せる。
+        logger.info("Analysis cache hit (db): %s", key)
+        # 次回以降はDB読み取りも省けるようメモリにも載せる。
         analysis_cache.memory_put(key, hit)
     return hit
 
 
 def _ensure_can_read(result: AnalysisResult, *, caller_has_access: bool) -> None:
-    """privateリポジトリの解析結果は、いま実際にアクセス権がある場合のみ返す。
+    """privateリポジトリの解析結果は、いま実際にPATを持っている場合のみ返す。
 
     ユーザーごとにキャッシュを分けるのではなく都度確認する方式にしているのは、
-    GitHub側でインストールを外された後もキャッシュが返り続ける事故を防ぐため。
+    トークンを設定画面から削除した後もキャッシュが返り続ける事故を防ぐため。
     ドキュメントはクイズと違い生のコードを原文のまま引用するので、ここは緩めない。
     """
     if result.private and not caller_has_access:
@@ -264,105 +278,119 @@ async def _analyze(
 
     key = analysis_cache.cache_key(ref.owner, ref.repo, ref.commit_sha)
     analysis_cache.memory_put(key, result)
-    store.save_cached_analysis(ref.owner, ref.repo, ref.commit_sha, url=url, result=result)
+    await store.save_cached_analysis(ref.owner, ref.repo, ref.commit_sha, url=url, result=result)
     return result
 
 
-# --- アカウント / GitHub連携 ----------------------------------------------
+# --- 認証（ID / パスワード） -----------------------------------------------
+
+
+@app.post("/api/v1/auth/register", response_model=AuthResponse)
+async def register(request: RegisterRequest) -> AuthResponse:
+    if not settings.auth_configured:
+        raise HTTPException(status_code=503, detail="Login is not available on this server")
+
+    existing = await store.get_user_by_email(request.email)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    user = await store.create_user(
+        email=request.email,
+        hashed_password=hash_password(request.password),
+        display_name=request.display_name,
+    )
+    token = create_access_token(user.id)
+    return AuthResponse(access_token=token, uid=str(user.id), email=user.email, name=user.display_name)
+
+
+@app.post("/api/v1/auth/login", response_model=AuthResponse)
+async def login(request: LoginRequest) -> AuthResponse:
+    if not settings.auth_configured:
+        raise HTTPException(status_code=503, detail="Login is not available on this server")
+
+    user = await store.get_user_by_email(request.email)
+    if user is None or not verify_password(request.password, user.hashed_password):
+        # メール不存在とパスワード誤りを区別しない（アカウントの存在を推測させないため）。
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = create_access_token(user.id)
+    return AuthResponse(access_token=token, uid=str(user.id), email=user.email, name=user.display_name)
+
+
+# --- アカウント / GitHubトークン --------------------------------------------
 
 
 @app.get("/api/v1/me", response_model=MeResponse)
 async def me(user: AuthUser = Depends(require_user)) -> MeResponse:
-    store.upsert_user(user.uid, email=user.email, name=user.name)
-    stored = store.get_user(user.uid) or {}
+    stored = await store.get_user_dict(user.uid) or {}
     return MeResponse(
         uid=user.uid,
         email=user.email,
         name=user.name,
         picture=user.picture,
         github_login=stored.get("github_login"),
-        installation_count=len(stored.get("installations", [])),
-        github_app_available=github_app.app_configured(),
+        has_github_token=bool(stored.get("github_token_encrypted")),
     )
 
 
-@app.post("/api/v1/github/link", response_model=LinkGithubResponse)
-async def link_github(
-    request: LinkGithubRequest,
+@app.put("/api/v1/github/token", response_model=GithubTokenStatusResponse)
+async def save_github_token(
+    request: SaveGithubTokenRequest,
     user: AuthUser = Depends(require_user),
-) -> LinkGithubResponse:
-    """サインイン直後のGitHubユーザートークンを受け取り、インストール一覧を同期する。
+) -> GithubTokenStatusResponse:
+    """設定画面から入力されたPersonal Access Tokenを保存する。
 
-    トークンはKMSで暗号化してから保存する（用途は再ログインなしの一覧再取得のみ）。
+    暗号化してDBに保存する。ログアウトして再ログインしても再入力なしで使えるようにするため。
     """
-    store.upsert_user(user.uid, email=user.email, name=user.name)
-    store.save_github_user_token(user.uid, request.github_access_token)
-
-    installations = await github_app.list_user_installations(request.github_access_token)
-    installation_ids = [int(i["id"]) for i in installations if i.get("id")]
-    github_login = next(
-        (i.get("account", {}).get("login") for i in installations if i.get("account")), None
-    )
-    store.set_installations(user.uid, installation_ids, github_login=github_login)
-
-    return LinkGithubResponse(
-        installation_count=len(installation_ids), github_login=github_login
-    )
-
-
-@app.get("/api/v1/github/install-url", response_model=InstallUrlResponse)
-async def install_url(user: AuthUser = Depends(require_user)) -> InstallUrlResponse:
     try:
-        return InstallUrlResponse(install_url=github_app.build_install_url(user.uid))
-    except github_app.GitHubAppNotConfiguredError as e:
-        raise HTTPException(status_code=503, detail="GitHub App is not configured") from e
+        github_login = await verify_user_token(request.token)
+    except InvalidTokenError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    saved = await store.save_github_user_token(user.uid, request.token, github_login=github_login)
+    if not saved:
+        # 暗号化鍵未設定などで保存できなかった場合。平文では絶対に保存しない。
+        raise HTTPException(
+            status_code=503,
+            detail="Token storage is not available on this server",
+        )
+
+    return GithubTokenStatusResponse(has_github_token=True, github_login=github_login)
 
 
-@app.get("/api/v1/github/setup-callback")
-async def setup_callback(installation_id: int | None = None, state: str | None = None):
-    """GitHub App インストール完了後にGitHubからリダイレクトされてくる。
-
-    ブラウザからの遷移なのでIDトークンを載せられない。代わりに install-url で
-    発行した署名付きstateからuidを復元して紐付ける。
-    """
-    redirect_base = settings.frontend_redirect_base
-
-    if not installation_id or not state:
-        return RedirectResponse(f"{redirect_base}?install=failed")
-
-    uid = github_app.verify_state(state)
-    if uid is None:
-        logger.warning("Rejected setup-callback with an invalid or expired state")
-        return RedirectResponse(f"{redirect_base}?install=failed")
-
-    store.add_installation(uid, installation_id)
-    return RedirectResponse(f"{redirect_base}?install=success")
+@app.delete("/api/v1/github/token", response_model=GithubTokenStatusResponse)
+async def delete_github_token(user: AuthUser = Depends(require_user)) -> GithubTokenStatusResponse:
+    await store.clear_github_user_token(user.uid)
+    return GithubTokenStatusResponse(has_github_token=False, github_login=None)
 
 
 @app.get("/api/v1/repositories", response_model=RepositoryListResponse)
 async def list_repositories(user: AuthUser = Depends(require_user)) -> RepositoryListResponse:
-    """GitHub App で許可されたリポジトリ一覧（リポジトリ選択UI用）。"""
-    if not github_app.app_configured():
-        raise HTTPException(status_code=503, detail="GitHub App is not configured")
+    """保存済みのPATでアクセスできるリポジトリ一覧（プライベート含む）。"""
+    token = await store.load_github_user_token(user.uid)
+    if token is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No GitHub token is saved. Add one in account settings first.",
+        )
 
-    repositories: list[RepositorySummary] = []
-    for installation_id in store.get_installations(user.uid):
-        try:
-            found = await github_app.list_installation_repositories(installation_id)
-        except github_app.GitHubAppNotConfiguredError:
-            continue
-        for repository in found:
-            repositories.append(
-                RepositorySummary(
-                    full_name=repository["full_name"],
-                    html_url=repository["html_url"],
-                    default_branch=repository.get("default_branch", "main"),
-                    private=bool(repository.get("private")),
-                    description=repository.get("description"),
-                    language=repository.get("language"),
-                )
-            )
+    try:
+        found = await list_my_repositories(token)
+    except InvalidTokenError as e:
+        # 保存済みトークンが失効しているケース。設定画面での再入力を促す。
+        raise HTTPException(status_code=401, detail=str(e)) from e
 
+    repositories = [
+        RepositorySummary(
+            full_name=repository["full_name"],
+            html_url=repository["html_url"],
+            default_branch=repository.get("default_branch", "main"),
+            private=bool(repository.get("private")),
+            description=repository.get("description"),
+            language=repository.get("language"),
+        )
+        for repository in found
+    ]
     repositories.sort(key=lambda r: r.full_name)
     return RepositoryListResponse(repositories=repositories)
 
@@ -375,13 +403,13 @@ async def record_answer(
     request: AnswerRequest,
     user: AuthUser = Depends(require_user),
 ) -> dict[str, str]:
-    store.record_answer(user.uid, request.repository_id, request.correct)
+    await store.record_answer(user.uid, request.repository_id, request.correct)
     return {"status": "ok"}
 
 
 @app.get("/api/v1/progress", response_model=ProgressResponse)
 async def get_progress(user: AuthUser = Depends(require_user)) -> ProgressResponse:
-    raw = store.get_progress(user.uid)
+    raw = await store.get_progress(user.uid)
     return ProgressResponse(
         learning_progress={
             repository_id: {

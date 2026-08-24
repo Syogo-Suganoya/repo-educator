@@ -1,20 +1,29 @@
-"""Firebase Authentication の ID トークン検証。
+"""自前のID/パスワード認証（JWT）。
 
 このアプリでは認証は「任意」である。未ログインのまま公開リポジトリを学習できる体験を
 壊さないため、クイズ生成では optional_user を使い、Authorization ヘッダがなければ
 黙って None を返す。ログインが前提の機能だけが require_user を使う。
+
+以前は Firebase Authentication（GitHub SSO）を使っていたが、通常のメールアドレス+
+パスワード認証に切り替えた。本人確認の方式が変わるだけで、GitHubリポジトリへの
+アクセスは元々これとは別（ユーザーが設定画面で入力するPersonal Access Token）だった
+ため、そちら側への影響はない。
 """
 
 import logging
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
+import bcrypt
+import jwt
 from fastapi import Depends, HTTPException, Request
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_initialized = False
+JWT_ALGORITHM = "HS256"
 
 
 @dataclass(frozen=True)
@@ -22,24 +31,46 @@ class AuthUser:
     uid: str
     email: str | None
     name: str | None
-    picture: str | None
+    picture: str | None = None
 
 
-def _ensure_firebase_app() -> bool:
-    """firebase_admin を遅延初期化する。設定が無い場合は False を返す。"""
-    global _initialized
-    if _initialized:
-        return True
-    if not settings.firebase_auth_configured:
+# --- パスワード ------------------------------------------------------------
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
+        # 壊れたハッシュ値など。認証失敗として扱う。
         return False
 
-    import firebase_admin
 
-    if not firebase_admin._apps:
-        project_id = settings.firebase_project_id or settings.gcp_project
-        firebase_admin.initialize_app(options={"projectId": project_id})
-    _initialized = True
-    return True
+# --- JWT --------------------------------------------------------------------
+
+
+def create_access_token(user_id: uuid.UUID) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "iat": now,
+        "exp": now + timedelta(days=settings.jwt_expires_days),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM)
+
+
+def decode_access_token(token: str) -> uuid.UUID | None:
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[JWT_ALGORITHM])
+        return uuid.UUID(payload["sub"])
+    except (jwt.InvalidTokenError, KeyError, ValueError):
+        return None
+
+
+# --- FastAPI 依存性 -----------------------------------------------------------
 
 
 def _extract_bearer(request: Request) -> str | None:
@@ -48,18 +79,6 @@ def _extract_bearer(request: Request) -> str | None:
     if scheme.lower() != "bearer" or not token.strip():
         return None
     return token.strip()
-
-
-def _verify(token: str) -> AuthUser:
-    from firebase_admin import auth as firebase_auth
-
-    decoded = firebase_auth.verify_id_token(token)
-    return AuthUser(
-        uid=decoded["uid"],
-        email=decoded.get("email"),
-        name=decoded.get("name"),
-        picture=decoded.get("picture"),
-    )
 
 
 async def optional_user(request: Request) -> AuthUser | None:
@@ -72,18 +91,23 @@ async def optional_user(request: Request) -> AuthUser | None:
     token = _extract_bearer(request)
     if token is None:
         return None
-    if not _ensure_firebase_app():
+    if not settings.auth_configured:
         # 認証基盤が未設定の環境では、トークンが来ても検証できない。
         # 公開リポジトリの利用は続けられるよう未ログイン扱いにする。
-        logger.warning("Received a bearer token but Firebase Auth is not configured; ignoring it")
+        logger.warning("Received a bearer token but auth is not configured; ignoring it")
         return None
 
-    try:
-        return _verify(token)
-    except Exception as e:
-        # 例外メッセージにトークンが含まれうるので、そのままクライアントに返さない。
-        logger.warning("ID token verification failed: %s", type(e).__name__)
-        raise HTTPException(status_code=401, detail="Invalid authentication token") from e
+    user_id = decode_access_token(token)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    from app import store
+
+    user = await store.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    return AuthUser(uid=str(user.id), email=user.email, name=user.display_name)
 
 
 async def require_user(user: AuthUser | None = Depends(optional_user)) -> AuthUser:

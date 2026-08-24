@@ -59,21 +59,6 @@ class ApiClient {
     );
   }
 
-  /// サインイン直後に一度だけ取得できるGitHubアクセストークンをバックエンドへ渡す。
-  Future<AccountInfo> linkGithub(String githubAccessToken) async {
-    final response = await http.post(
-      Uri.parse('$_apiBaseUrl/api/v1/github/link'),
-      headers: await _headers(),
-      body: jsonEncode({'github_access_token': githubAccessToken}),
-    );
-    if (response.statusCode != 200) _throwFrom(response);
-    final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    return AccountInfo(
-      githubLogin: body['github_login'] as String?,
-      installationCount: body['installation_count'] as int? ?? 0,
-    );
-  }
-
   Future<AccountInfo> fetchMe() async {
     final response = await http.get(
       Uri.parse('$_apiBaseUrl/api/v1/me'),
@@ -83,19 +68,32 @@ class ApiClient {
     final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     return AccountInfo(
       githubLogin: body['github_login'] as String?,
-      installationCount: body['installation_count'] as int? ?? 0,
-      githubAppAvailable: body['github_app_available'] as bool? ?? false,
+      hasGithubToken: body['has_github_token'] as bool? ?? false,
     );
   }
 
-  Future<String> fetchInstallUrl() async {
-    final response = await http.get(
-      Uri.parse('$_apiBaseUrl/api/v1/github/install-url'),
-      headers: await _headers(json: false),
+  /// 設定画面で入力されたPersonal Access Tokenを保存する。
+  /// サーバー側でトークンの有効性を確認したうえで暗号化保存するため、失敗しうる。
+  Future<AccountInfo> saveGithubToken(String token) async {
+    final response = await http.put(
+      Uri.parse('$_apiBaseUrl/api/v1/github/token'),
+      headers: await _headers(),
+      body: jsonEncode({'token': token}),
     );
     if (response.statusCode != 200) _throwFrom(response);
     final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    return body['install_url'] as String;
+    return AccountInfo(
+      githubLogin: body['github_login'] as String?,
+      hasGithubToken: body['has_github_token'] as bool? ?? false,
+    );
+  }
+
+  Future<void> clearGithubToken() async {
+    final response = await http.delete(
+      Uri.parse('$_apiBaseUrl/api/v1/github/token'),
+      headers: await _headers(json: false),
+    );
+    if (response.statusCode != 200) _throwFrom(response);
   }
 
   Future<List<RepositorySummary>> fetchRepositories() async {
@@ -152,13 +150,16 @@ class QuizApiException implements Exception {
     }
     if (statusCode == 403) {
       return 'このリポジトリを読む権限がありません。プライベートリポジトリの場合は、'
-          'GitHubでログインしたうえでリポジトリへのアクセスを許可してください。';
+          'アカウント設定でGitHubのPersonal Access Tokenを保存してください。';
     }
     if (statusCode == 401) {
-      return 'ログインの有効期限が切れています。もう一度ログインしてください。';
+      return '保存されているGitHubトークンが無効か期限切れです。設定画面で入力し直してください。';
     }
     if (statusCode == 503) {
       return 'この機能はサーバー側で有効化されていません。';
+    }
+    if (detail.contains('No GitHub token is saved')) {
+      return 'GitHubトークンが未設定です。アカウント設定から入力してください。';
     }
     if (detail.contains('not found')) {
       return 'リポジトリまたはブランチが見つかりません。URLとブランチ名を確認してください。';

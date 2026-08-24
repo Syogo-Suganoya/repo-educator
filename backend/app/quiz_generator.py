@@ -1,7 +1,7 @@
-import json
 import uuid
 
 from app.config import settings
+from app.gemini import generate_json
 from app.schemas import FeatureSection, Quiz
 
 SYSTEM_INSTRUCTION = """\
@@ -77,7 +77,7 @@ def _build_prompt(files: list[dict[str, str]], num_questions: int, focus_languag
 
 
 def generate_mock_sections(files: list[dict[str, str]], num_questions: int) -> list[FeatureSection]:
-    """Vertex AI未接続時のフォールバック。固定パターンのクイズをファイル数に応じて生成する。"""
+    """Gemini未接続時のフォールバック。固定パターンのクイズをファイル数に応じて生成する。"""
     sample_files = files or [{"path": "sample.py", "content": "def add(a, b):\n    return a + b"}]
     quizzes: list[Quiz] = []
     for i in range(num_questions):
@@ -95,7 +95,7 @@ def generate_mock_sections(files: list[dict[str, str]], num_questions: int) -> l
                 correct_answer="+",
                 explanation=(
                     "この関数は2つの引数を加算して返すため、`+` 演算子が正解です"
-                    "（これはVertex AI未接続時のモック応答です）。"
+                    "（これはGemini未接続時のモック応答です）。"
                 ),
             )
         )
@@ -103,7 +103,7 @@ def generate_mock_sections(files: list[dict[str, str]], num_questions: int) -> l
         FeatureSection(
             section_id=str(uuid.uuid4()),
             title="サンプル機能",
-            description="Vertex AI未接続時に表示される仮の機能セクションです。",
+            description="Gemini未接続時に表示される仮の機能セクションです。",
             quizzes=quizzes,
         )
     ]
@@ -112,28 +112,15 @@ def generate_mock_sections(files: list[dict[str, str]], num_questions: int) -> l
 async def generate_quizzes(
     files: list[dict[str, str]], num_questions: int, focus_language: str | None
 ) -> list[FeatureSection]:
-    if not settings.vertex_ai_configured:
+    if not settings.gemini_configured:
         return generate_mock_sections(files, num_questions)
 
-    from vertexai.generative_models import GenerationConfig, GenerativeModel
-    import vertexai
-
-    vertexai.init(project=settings.gcp_project, location=settings.gcp_location)
-    model = GenerativeModel(
-        "gemini-1.5-flash",
+    payload = await generate_json(
         system_instruction=SYSTEM_INSTRUCTION,
+        prompt=_build_prompt(files, num_questions, focus_language),
+        response_schema=SECTION_RESPONSE_SCHEMA,
     )
-    prompt = _build_prompt(files, num_questions, focus_language)
-    # 同期版の generate_content はイベントループをブロックし、
-    # ドキュメント生成との並行実行ができなくなるため async 版を使う。
-    response = await model.generate_content_async(
-        prompt,
-        generation_config=GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=SECTION_RESPONSE_SCHEMA,
-        ),
-    )
-    payload = json.loads(response.text)
+
     sections: list[FeatureSection] = []
     for section_data in payload.get("sections", []):
         quizzes = [

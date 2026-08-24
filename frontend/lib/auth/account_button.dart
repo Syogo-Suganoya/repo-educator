@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
+import '../models/repository.dart';
 import '../theme.dart';
 import 'auth_service.dart';
+import 'github_token_dialog.dart';
+import 'login_dialog.dart';
 
 /// トップバー右端に置くアカウント表示。
-/// 未ログイン時は「GitHubでログイン」、ログイン時はアカウント名とメニューを出す。
+/// 未ログイン時は「ログイン」、ログイン時はアカウント名とメニューを出す。
 class AccountButton extends StatefulWidget {
   const AccountButton({
     super.key,
@@ -23,36 +26,45 @@ class AccountButton extends StatefulWidget {
 }
 
 class _AccountButtonState extends State<AccountButton> {
-  bool _busy = false;
+  AccountInfo _account = const AccountInfo();
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.authService.isSignedIn) _refreshAccount();
+  }
+
+  Future<void> _refreshAccount() async {
+    try {
+      final account = await widget.apiClient.fetchMe();
+      if (mounted) setState(() => _account = account);
+    } catch (_) {
+      // アカウント情報が取れなくても、ログイン状態の表示自体は継続する。
+    }
+  }
 
   Future<void> _signIn() async {
-    setState(() => _busy = true);
-    try {
-      final githubToken = await widget.authService.signInWithGithub();
-      // アクセストークンはこの直後しか取れないので、すぐバックエンドへ預ける。
-      if (githubToken != null) {
-        await widget.apiClient.linkGithub(githubToken);
-      }
+    // ダイアログ内で register/login を行う。ここでは結果を受け取るだけ。
+    final signedIn = await LoginDialog.show(context, authService: widget.authService);
+    if (signedIn == true) {
       widget.onChanged?.call();
-    } on AuthUnavailableException {
-      _showMessage('ログイン機能はこの環境で有効化されていません。');
-    } catch (_) {
-      _showMessage('ログインに失敗しました。もう一度お試しください。');
-    } finally {
-      if (mounted) setState(() => _busy = false);
+      await _refreshAccount();
     }
   }
 
   Future<void> _signOut() async {
     await widget.authService.signOut();
+    setState(() => _account = const AccountInfo());
     widget.onChanged?.call();
   }
 
-  void _showMessage(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message, style: appBody(13, color: Colors.white))),
+  Future<void> _openTokenDialog() async {
+    final updated = await GithubTokenDialog.show(
+      context,
+      apiClient: widget.apiClient,
+      account: _account,
     );
+    if (updated != null && mounted) setState(() => _account = updated);
   }
 
   @override
@@ -62,20 +74,14 @@ class _AccountButtonState extends State<AccountButton> {
     return ListenableBuilder(
       listenable: widget.authService,
       builder: (context, _) {
-        if (_busy) {
-          return const SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2, color: AppPalette.inkMuted),
-          );
-        }
+        if (!widget.authService.isReady) return const SizedBox.shrink();
 
         if (!widget.authService.isSignedIn) {
           return TextButton.icon(
             onPressed: _signIn,
             icon: const Icon(Icons.lock_open, size: 15, color: AppPalette.accent),
             label: Text(
-              'GitHubでログイン',
+              'ログイン',
               style: appMono(12.5, color: AppPalette.accent, weight: FontWeight.w700),
             ),
           );
@@ -86,8 +92,23 @@ class _AccountButtonState extends State<AccountButton> {
           tooltip: 'アカウント',
           onSelected: (value) {
             if (value == 'signout') _signOut();
+            if (value == 'github_token') _openTokenDialog();
           },
           itemBuilder: (context) => [
+            PopupMenuItem(
+              value: 'github_token',
+              child: Row(
+                children: [
+                  Icon(
+                    _account.hasGithubToken ? Icons.check_circle_outline : Icons.key_outlined,
+                    size: 16,
+                    color: _account.hasGithubToken ? AppPalette.add : AppPalette.inkMuted,
+                  ),
+                  const SizedBox(width: 8),
+                  Text('GitHubトークン', style: appBody(13.5)),
+                ],
+              ),
+            ),
             PopupMenuItem(
               value: 'signout',
               child: Text('ログアウト', style: appBody(13.5)),

@@ -72,7 +72,30 @@ class QuizGenerateResponse(BaseModel):
     cached: bool = False
 
 
-# --- 認証・GitHub連携 -----------------------------------------------------
+# --- 認証（ID / パスワード） -----------------------------------------------
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=8)
+    display_name: str | None = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    """登録・ログインの成功時に返す。フロントはtokenを保存してBearerとして使う。"""
+
+    access_token: str
+    uid: str
+    email: str
+    name: str | None = None
+
+
+# --- アカウント / GitHub連携 -----------------------------------------------
 
 
 class MeResponse(BaseModel):
@@ -81,23 +104,21 @@ class MeResponse(BaseModel):
     name: str | None = None
     picture: str | None = None
     github_login: str | None = None
-    installation_count: int = 0
-    github_app_available: bool = False
+    # PATそのものは絶対に返さない。「設定済みかどうか」だけをフロントに伝える。
+    has_github_token: bool = False
 
 
-class LinkGithubRequest(BaseModel):
-    """サインイン直後にしか取得できないGitHubユーザートークンを受け取る。"""
+class SaveGithubTokenRequest(BaseModel):
+    """ユーザーが設定画面で入力したPersonal Access Token。"""
 
-    github_access_token: str
-
-
-class LinkGithubResponse(BaseModel):
-    installation_count: int
+    token: str
+    # GET /user から取れたログイン名を添えられればUI表示に使う（任意）。
     github_login: str | None = None
 
 
-class InstallUrlResponse(BaseModel):
-    install_url: str
+class GithubTokenStatusResponse(BaseModel):
+    has_github_token: bool
+    github_login: str | None = None
 
 
 class RepositorySummary(BaseModel):

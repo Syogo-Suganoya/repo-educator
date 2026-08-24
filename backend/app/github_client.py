@@ -66,6 +66,56 @@ class RepositoryRef:
     private: bool
 
 
+class InvalidTokenError(Exception):
+    """入力されたPersonal Access TokenをGitHubが受け付けなかった。"""
+
+
+async def verify_user_token(token: str) -> str | None:
+    """PATが有効か確認し、有効なら GitHub のログイン名を返す。
+
+    ユーザーが設定画面で貼り付けた直後に呼び、無効な値をそのまま
+    保存してしまわないようにする。
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{GITHUB_API}/user",
+            headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"},
+        )
+    if resp.status_code == 401:
+        raise InvalidTokenError("The provided GitHub token is invalid or has expired")
+    resp.raise_for_status()
+    return resp.json().get("login")
+
+
+async def list_my_repositories(token: str) -> list[dict]:
+    """PATを持つ本人がアクセスできるリポジトリ一覧（プライベート含む）。
+
+    installation という概念がないぶん、GitHub App方式より単純: 保存済みの
+    ユーザー自身のトークンでそのまま `GET /user/repos` を叩くだけでよい。
+    """
+    repositories: list[dict] = []
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        page = 1
+        while True:
+            resp = await client.get(
+                f"{GITHUB_API}/user/repos",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token}",
+                },
+                params={"per_page": 100, "page": page, "sort": "pushed", "affiliation": "owner,collaborator,organization_member"},
+            )
+            if resp.status_code == 401:
+                raise InvalidTokenError("The provided GitHub token is invalid or has expired")
+            resp.raise_for_status()
+            chunk = resp.json()
+            repositories.extend(chunk)
+            if len(chunk) < 100:
+                break
+            page += 1
+    return repositories
+
+
 def parse_repository_url(repository_url: str) -> tuple[str, str]:
     match = re.search(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repository_url.strip())
     if not match:
