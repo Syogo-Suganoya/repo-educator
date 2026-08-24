@@ -1,7 +1,5 @@
 # 開発ガイド（CONTRIBUTING）
 
-ローカルでの開発環境のセットアップと開発フローをまとめる。システム全体の設計は [README.md](README.md)、本番デプロイは [DEPLOY.md](DEPLOY.md) を参照。
-
 ## 必要なツール
 
 - Docker（Docker Compose v2）
@@ -13,17 +11,17 @@
 ```
 repo-educator/
 ├── README.md          # システム基本設計書
-├── DEPLOY.md          # リリース・デプロイ手順
 ├── backend/           # FastAPI バックエンド（Docker）
 │   ├── app/
 │   │   ├── main.py            # エンドポイント定義・CORS
 │   │   ├── schemas.py         # Pydanticモデル（リクエスト/レスポンス）
-│   │   ├── auth.py            # Firebase IDトークン検証（認証は任意）
-│   │   ├── github_client.py   # GitHub APIからのソース取得（Blobs API）
-│   │   ├── github_app.py      # GitHub App のトークン発行・インストール照会
+│   │   ├── auth.py            # ID/パスワード認証（bcrypt）とJWT発行・検証
+│   │   ├── db.py              # SQLAlchemyモデルとDB接続（PostgreSQL）
+│   │   ├── github_client.py   # GitHub APIからのソース取得（Blobs API・PAT検証・リポジトリ一覧）
 │   │   ├── analysis_cache.py  # メモリキャッシュとsingle-flight（後述）
-│   │   ├── store.py           # Firestore（ユーザー・履歴・解析結果キャッシュ）
-│   │   ├── crypto.py          # Cloud KMS による暗号化
+│   │   ├── store.py           # DBアクセス層（ユーザー・履歴・解析結果キャッシュ）
+│   │   ├── crypto.py          # Fernetによる対称鍵暗号化
+│   │   ├── gemini.py          # Gemini接続の集約（SDK・モデルの差し替え点）
 │   │   ├── quiz_generator.py  # クイズ生成（Gemini + モックフォールバック）
 │   │   ├── doc_generator.py   # 逆引きドキュメント生成（同上）
 │   │   ├── sample_quizzes.py  # デモ用キュレーション済みクイズ（後述）
@@ -31,19 +29,18 @@ repo-educator/
 │   │   └── config.py          # 環境変数（pydantic-settings）
 │   ├── tests/                 # pytest（キャッシュとエラー分類）
 │   ├── Dockerfile
-│   ├── docker-compose.yml
+│   ├── docker-compose.yml     # backend + PostgreSQL
 │   ├── requirements-dev.txt   # テスト用の依存（本番イメージには入れない）
 │   └── .env.example
 └── frontend/          # Flutter Web フロントエンド
     └── lib/
-        ├── main.dart              # アプリ起動・Firebase初期化
+        ├── main.dart              # アプリ起動
         ├── start_page.dart        # 起点となる画面
         ├── workspace_page.dart    # レビュー/ドキュメントのタブとクイズUI
-        ├── repositories_page.dart # プライベートリポジトリ選択
-        ├── firebase_options.dart  # Firebase設定（--dart-defineから読む）
+        ├── repositories_page.dart # トークンで読めるリポジトリの選択
         ├── api_client.dart        # バックエンドAPIクライアント
         ├── theme.dart             # 配色・タイポグラフィ・共通部品（後述）
-        ├── auth/                  # ログイン処理とアカウントUI
+        ├── auth/                  # ログイン・登録UIとJWTの永続化
         ├── docs/                  # 逆引きドキュメント（検索ロジックとUI）
         └── models/                # レスポンスのDartモデル
 ```
@@ -62,40 +59,40 @@ cp .env.example .env   # 初回のみ。必要に応じてトークン等を記�
 docker compose up --build
 ```
 
+- `docker-compose.yml` は `backend` と `db`（PostgreSQL）の2サービス構成。`db` のヘルスチェックが通ってから `backend` が起動する
 - http://localhost:8000 で起動する（ホットリロード有効: `./app` をbindマウントして `--reload` 付きで実行）
 - APIドキュメント（Swagger UI）: http://localhost:8000/docs
-- 停止: `docker compose down`
+- テーブルは起動時に自動作成される（`app/db.py` の `init_models()`。Alembic等のマイグレーションツールは導入していない）
+- 停止: `docker compose down`（`-v` を付けるとDBのボリュームごと消える）
 
 ### 環境変数（`backend/.env`）
 
 | 変数 | 説明 |
 |---|---|
-| `GITHUB_TOKEN` | GitHub PAT。未設定でも動くがレートリミットが厳しくなる（60req/h） |
-| `GCP_PROJECT` | GCPプロジェクトID。Vertex AI接続に必要 |
-| `GCP_LOCATION` | Vertex AIのリージョン（既定: `us-central1`） |
-| `GOOGLE_APPLICATION_CREDENTIALS` | サービスアカウントキーのパス（ローカル開発用。Cloud Run上では不要） |
-| `FIREBASE_PROJECT_ID` | 空ならログイン機能が無効になる |
-| `FIRESTORE_ENABLED` | 学習履歴・クイズキャッシュの有効/無効（既定: `true`） |
-| `GITHUB_APP_ID` / `GITHUB_APP_SLUG` / `GITHUB_APP_PRIVATE_KEY` | GitHub App。空ならログインしてもプライベートリポジトリは読めない |
-| `KMS_KEY_NAME` | GitHubユーザートークンの暗号化鍵。空なら**トークンを保存しない**（平文保存はしない） |
+| `GITHUB_TOKEN` | サーバ共有のGitHub PAT。未ログインでの公開リポジトリ取得に使う。未設定でも動くがレートリミットが厳しくなる（60req/h）。**ユーザー個別のトークンはここには置かない** |
+| `GEMINI_API_KEY` | Geminiの利用に必要。[ai.google.dev](https://aistudio.google.com/apikey) で発行するAPIキー1本。**GCPプロジェクトは不要**（Vertex AIは使っていない） |
+| `GEMINI_MODEL` | 使用するGeminiモデル（既定: `gemini-3.5-flash`）。廃止時はここだけ変えればよい |
+| `DATABASE_URL` | PostgreSQLの接続文字列。空ならログイン機能・履歴・解析結果キャッシュがすべて無効になる。ローカルは `docker-compose.yml` の `db` サービスを指す既定値、本番はNeon等に差し替える |
+| `JWT_SECRET` | JWTの署名鍵。空ならログイン機能が無効になる。ランダムな文字列を設定する |
+| `JWT_EXPIRES_DAYS` | JWTの有効期限（既定: `30`日） |
+| `ENCRYPTION_KEY` | ユーザーが入力したGitHub PATの暗号化鍵（Fernet）。空なら**そのトークンを保存しない**（平文保存はしない） |
 | `FRONTEND_ORIGIN` | CORS許可オリジン。空なら `*`（開発用）。本番では必ず指定する |
-| `STATE_SECRET` | GitHub Appインストール時のstate署名鍵。空ならプロセス起動ごとにランダム生成 |
 
-**設定は「揃っていない機能から順に無効になる」設計**にしてあり、何も設定しなくてもアプリは起動する。
+**設定は「揃っていない機能から順に無効になる」設計**にしてあり、何も設定しなくてもアプリは起動する。`GEMINI_API_KEY` と `DATABASE_URL`/`JWT_SECRET`（ログイン機能）は完全に独立しており、どちらか一方だけを設定してもよい。
 
 | 未設定のもの | 起きること |
 |---|---|
-| `FIREBASE_PROJECT_ID` | ログインボタン自体が出ない。公開リポジトリの学習はそのまま使える |
-| `GITHUB_APP_*` | ログインはできるが、プライベートリポジトリの一覧・学習ができない |
-| `FIRESTORE_ENABLED=false` または プロジェクトID空 | 学習履歴と解析結果のキャッシュが保存されない |
-| `KMS_KEY_NAME` | GitHubユーザートークンを保存しない（毎回ログイン時に再取得する） |
+| `GEMINI_API_KEY` | クイズ・ドキュメントがモック応答になる（下記参照） |
+| `DATABASE_URL` | ログイン・学習履歴・解析結果の永続キャッシュがすべて無効。公開リポジトリの学習はメモリキャッシュのみで動く |
+| `JWT_SECRET` | ログインボタンは出るが、登録・ログインに失敗する（503） |
+| `ENCRYPTION_KEY` | ユーザーがトークンを入力しても保存されない（毎回入力し直しになる） |
 
-**`GCP_PROJECT` が未設定の場合、Vertex AIは呼ばれない。** その場合の応答は2パターンある。
+**`GEMINI_API_KEY` が未設定の場合、Geminiは呼ばれない。** その場合の応答は2パターンある。
 
 1. 下記「サンプルリポジトリ」に該当するリポジトリ → `app/sample_quizzes.py` と `app/sample_docs.py` の**キュレーション済みデータ**（実コードを人手で読んで作成した固定データ。Geminiによる生成ではない）
 2. それ以外のリポジトリ → `generate_mock_sections`（`quiz_generator.py`）と `generate_mock_docs`（`doc_generator.py`）による、内容を反映しない汎用モック
 
-GCPなしでもフロントエンドの開発・デモが一通り可能な設計になっている。モックであっても `kind` は4種類すべて揃うため、ドキュメント画面のレイアウト確認はGCPなしで行える。
+外部サービスなしでもフロントエンドの開発・デモが一通り可能な設計になっている。モックであっても `kind` は4種類すべて揃うため、ドキュメント画面のレイアウト確認はGeminiなしで行える。
 
 ### 動作確認
 
@@ -111,7 +108,7 @@ curl -X POST localhost:8000/api/v1/quiz/generate \
 
 ### サンプルリポジトリ（キュレーション済みデータ）
 
-以下3つのリポジトリはGCP未接続でも、実コードに基づいた質の高いクイズとドキュメントが返る。フロントエンドの「サンプルPRを開く」からもワンクリックで呼び出せる。
+以下3つのリポジトリはGemini未接続でも、実コードに基づいた質の高いクイズとドキュメントが返る。フロントエンドの「サンプルPRを開く」からもワンクリックで呼び出せる。
 
 | リポジトリ | ブランチ | 内容 |
 |---|---|---|
@@ -140,22 +137,11 @@ flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8000
 
 - Chromeを使わない場合は `-d web-server --web-port=5173` で http://localhost:5173 から確認できる
 - `API_BASE_URL` 未指定時の既定値は `http://localhost:8000`（`lib/api_client.dart`）
+- 認証は自前実装（メールアドレス + パスワード）のため、フロントエンド側に追加の `--dart-define` は不要。バックエンドの `DATABASE_URL` / `JWT_SECRET` が設定されていれば、そのままログイン・新規登録が使える
 
-### ログイン機能を有効にして起動する
+### プライベートリポジトリを試す
 
-`lib/firebase_options.dart` は `flutterfire configure` の生成物ではなく、`API_BASE_URL` と同じく `--dart-define` から設定を読む。値はFirebaseコンソールの「プロジェクトの設定 > マイアプリ（ウェブ）」から取得する。
-
-```bash
-flutter run -d chrome \
-  --dart-define=API_BASE_URL=http://localhost:8000 \
-  --dart-define=FIREBASE_API_KEY=... \
-  --dart-define=FIREBASE_APP_ID=... \
-  --dart-define=FIREBASE_PROJECT_ID=... \
-  --dart-define=FIREBASE_MESSAGING_SENDER_ID=... \
-  --dart-define=FIREBASE_AUTH_DOMAIN=...
-```
-
-`FIREBASE_API_KEY` / `FIREBASE_APP_ID` / `FIREBASE_PROJECT_ID` の3つが揃わない限り Firebase は初期化されず、ログインボタンも表示されない（アプリ自体は起動する）。
+ログイン後、アカウントメニューの「GitHubトークン」から Personal Access Token を入力する。バックエンドが `GET /user` で有効性を確認したうえで保存するため、無効な値は保存されない。GitHub App のインストールのような追加設定は不要。
 
 ## 開発フロー
 
@@ -163,14 +149,50 @@ flutter run -d chrome \
 2. バックエンドを変更した場合:
    - 依存関係を追加したら `requirements.txt` に追記し `docker compose up --build` で再ビルド
    - `app/` 配下の変更はホットリロードで即反映される
+   - `db.py` のモデルを変更した場合、開発中は `docker compose down -v && docker compose up --build` でテーブルを作り直すのが手早い（マイグレーション未導入のため）
 3. フロントエンドを変更した場合: 実行中のターミナルで `r`（ホットリロード）
 4. コミット前に動作確認（上記curl + ブラウザでの一連の操作）を行う
+
+## 認証（ID / パスワード）
+
+**本人確認は自前実装のメールアドレス + パスワード認証。GitHub SSOなどの外部IdPには依存しない。**
+
+- パスワードは `bcrypt` でハッシュ化して `users.hashed_password` に保存する。平文は一切保存しない
+- ログイン成功時に `PyJWT`（HS256、署名鍵は `JWT_SECRET`）でJWTを発行する。有効期限は `JWT_EXPIRES_DAYS`（既定30日）
+- フロントエンドは発行されたJWTを `shared_preferences`（Webでは実質localStorage）に保存し、以降 `Authorization: Bearer <JWT>` として送る。`frontend/lib/auth/auth_service.dart` を参照
+- 認証ロジックは `app/auth.py` の `optional_user` / `require_user`（FastAPI依存性）に集約している。**未ログインでの公開リポジトリ利用を壊さないよう、`optional_user` は認証ヘッダがなければ黙って `None` を返す**（クイズ生成はこちらを使う）
+
+### GitHubトークンとの違い
+
+このアプリには性質の異なる2種類の認証情報がある。混同しないこと。
+
+| | 役割 | 保存場所 | 有効期限 |
+|---|---|---|---|
+| メール+パスワード → JWT | **本人確認**（誰がログインしているか） | `users.hashed_password`（ハッシュのみ） | JWTは30日（既定） |
+| GitHub Personal Access Token | **リポジトリへのアクセス権** | `users.github_token_encrypted`（Fernet暗号化） | GitHub側の設定次第（無期限〜数日） |
+
+## Gemini の呼び出し
+
+**Gemini への接続は `app/gemini.py` の `generate_json()` に集約してある。** クイズ生成もドキュメント生成もここを経由する。SDKやモデルを直接触るコードを他のファイルに増やさないこと。
+
+- **SDKは `google-genai`。** 旧 `vertexai.generative_models`（`google-cloud-aiplatform`）は2026年6月24日に**削除済み**で、新しいGeminiモデルは使えない
+- **接続は Gemini Developer API（`GEMINI_API_KEY` 1本）。Vertex AI は使わない。** `genai.Client(api_key=...)` で初期化しており、`vertexai=True` は指定しない。GCPプロジェクトはこの接続には不要
+- 呼び出しは `client.aio.models.generate_content`（非同期）。クイズとドキュメントを `asyncio.gather` で並行実行するため、同期版でイベントループを塞いではいけない
+- クライアントはプロセスで1つだけ遅延生成する
+
+### モデルを変えるとき
+
+`.env` の `GEMINI_MODEL` を変えるだけでよい（既定は `gemini-3.5-flash`）。**コードに直書きしないこと。**
+
+Geminiのモデルは定期的に廃止される。Gemini 1.5 系は既に404を返し、2.5 系も2026年10月16日に終了予定。以前はモデルIDが `quiz_generator.py` と `doc_generator.py` の2箇所に直書きされており、廃止時に両方を直す必要があった。
+
+現行モデルは [Gemini Developer API のモデル一覧](https://ai.google.dev/gemini-api/docs/models)で確認する。
 
 ## 解析結果のキャッシュ
 
 同じリポジトリ・同じコミットへのリクエストは、**ユーザーをまたいで結果を共有する**。GitHub APIのレートリミットとGeminiの料金がどちらも実際の制約になるため。
 
-- メモリ（`analysis_cache.py`）→ Firestore（`store.py`）の順に探し、両方ミスしたときだけ生成する
+- メモリ（`analysis_cache.py`）→ PostgreSQL（`store.py`、`analysis_cache` テーブル）の順に探し、両方ミスしたときだけ生成する
 - 同時に走る同一リクエストは `analysis_cache.run_once` で1本にまとめる
 - キャッシュキーはブランチ名ではなく**コミットSHA**。ブランチが進めば自動的に別エントリになる
 
@@ -224,19 +246,23 @@ cd frontend && flutter test test/doc_search_test.dart
 ## よくあるハマりどころ
 
 - **404 "not found"**: ブランチ名の間違いが多い。古いリポジトリは `master` がデフォルト
-- **403 が返る**: プライベートリポジトリに対してログインしていない、またはGitHub Appをそのリポジトリにインストールしていない。404（存在しない）と403（読めない）は意図的に区別している
-- **429 が返る**: GitHub APIのレートリミット。未認証は60req/hしかないため、開発中に数リポジトリ解析するだけで到達する。`.env` に `GITHUB_TOKEN` を設定すると5,000req/hになる。現在の残数は `curl -s https://api.github.com/rate_limit` で確認できる
-- **同じリポジトリなのに毎回生成される**: `.env` の `FIREBASE_PROJECT_ID` が空だとFirestoreキャッシュが効かず、プロセス内メモリキャッシュのみになる。バックエンドを再起動するとメモリキャッシュは消える
+- **403 が返る**: プライベートリポジトリに対してログインしていない、またはアカウント設定にGitHubトークンを保存していない。404（存在しない）と403（読めない）は意図的に区別している
+- **`PUT /api/v1/github/token` が400を返す**: 入力したトークンをGitHubが受け付けなかった（無効・失効・タイポ）。`GET /user` での検証に失敗している
+- **429 が返る**: GitHub APIのレートリミット。未認証は60req/hしかないため、開発中に数リポジトリ解析するだけで到達する。ログインしてアカウント設定にトークンを保存すると5,000req/hになる（バックエンド共有の `.env` の `GITHUB_TOKEN` でも同様に緩和できる）。現在の残数は `curl -s https://api.github.com/rate_limit` で確認できる
+- **同じリポジトリなのに毎回生成される**: `.env` の `DATABASE_URL` が空だとDBキャッシュが効かず、プロセス内メモリキャッシュのみになる。バックエンドを再起動するとメモリキャッシュは消える
 - **リポジトリを更新したのに問題が変わらない**: 対象ブランチのコミットSHAが変わっているか確認する。別ブランチへのpushでは（`pushed_at` は進んでも）意図的に再生成しない
-- **モッククイズ／モックドキュメントしか返らない**: `.env` の `GCP_PROJECT` が空。意図的な仕様（上記参照）
+- **モッククイズ／モックドキュメントしか返らない**: `.env` の `GEMINI_API_KEY` が空。意図的な仕様（上記参照）。`DATABASE_URL` はログイン機能用で、Geminiの動作には関係ない
 - **ドキュメントからクイズへのリンクが出ない**: `related_section_titles` とクイズのセクション名が文字列一致していない。Geminiが別々の呼び出しで生成するため命名がずれることがあり、一致しない場合はリンクを出さない仕様にしている
-- **ログインボタンが出ない**: `FIREBASE_*` の `--dart-define` が未指定。これも意図的な仕様（上記参照）
+- **登録・ログインで503が返る**: `.env` の `JWT_SECRET` または `DATABASE_URL` が空。ログイン機能そのものが無効になっている
+- **登録・ログインでサーバーに接続できないエラーになる**: `db` コンテナが起動しているか確認する（`docker compose ps`）。ヘルスチェック通過前に `backend` が起動していると接続に失敗する
 - **CORSエラー**: 開発中は `FRONTEND_ORIGIN` 未指定＝全許可なので通常発生しない。発生したらバックエンドが起動しているか確認
-- **プライベートリポジトリが一覧に出ない**: GitHub App のインストール時にそのリポジトリを選択したか確認する。リポジトリ選択画面の「リポジトリを追加・変更」から変更できる
+- **プライベートリポジトリが一覧に出ない**: `ENCRYPTION_KEY` が未設定だとトークンが保存されず、毎回未設定扱いになる。次にトークンの権限（`repo` スコープなど）を確認する
 - **`.env` は絶対にコミットしない**（`backend/.gitignore` で除外済み）
 
 ## セキュリティ上の約束事
 
-- **GitHubのトークンをログに出さない。** 例外処理でGitHub APIのレスポンス本文をそのままクライアントへ返さないこと（`github_app.py` はステータスコードのみをログに出している）
-- **installation access token を永続化しない。** 1時間で失効する短命トークンであり、都度発行するのが正しい
-- **Firestoreへのクライアント直接アクセスを許可しない。** ルールは全拒否のままにし、読み書きは必ずバックエンド経由にする
+- **GitHubのトークンをログに出さない。** 例外処理でGitHub APIのレスポンス本文をそのままクライアントへ返さないこと
+- **パスワードは常に `bcrypt` でハッシュ化する。** 平文はDBにもログにも一切残さない
+- **ユーザーが入力したPATを平文で保存しない。** Fernetで暗号化できない場合は保存自体をスキップする（`store.save_github_user_token` の戻り値で確認できる）
+- **DBへの直接アクセスをフロントエンドに許可しない。** 接続情報を持つのはバックエンドのみとし、読み書きは必ずAPI経由にする
+- **`JWT_SECRET` は複数インスタンスで共有すること。** インスタンスごとに異なると、あるインスタンスで発行したJWTが他のインスタンスで検証できず、ユーザーがランダムにログアウトされたような挙動になる

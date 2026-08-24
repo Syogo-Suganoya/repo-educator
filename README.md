@@ -12,8 +12,8 @@
 
 ### 1.1 開発要件への適合
 * **Google Cloud アプリケーション実行プロダクト**: **Cloud Run** を採用（コンテナベースの柔軟性とリクエスト課金によるコスト最適化）。
-* **Google Cloud AI 技術**: **Vertex AI (Gemini API)** を採用（`Gemini 1.5 Pro/Flash` の広大なコンテキストウィンドウを活かし、複数ファイルを丸ごと解析）。
-* **その他の技術（任意）**: フロントエンドに **Flutter (Web)**、データ・認証基盤に **Firebase (Authentication, Firestore)** を採用。
+* **AI技術**: **Gemini**（既定 `gemini-3.5-flash`）を採用。広大なコンテキストウィンドウを活かし、複数ファイルを丸ごと解析する。呼び出しは **Gemini Developer API（APIキー1本）** で行い、Vertex AI（GCPプロジェクト・IAM経由）は使わない。AIの利用に GCP プロジェクトを必要としない構成にしている（詳細は 2.2 参照）。
+* **その他の技術（任意）**: フロントエンドに **Flutter (Web)**。ログイン機能・データ永続化は自前実装（**FastAPI + JWT + PostgreSQL**）で、GCPやFirebaseには依存しない。DBは Docker Compose のローカルコンテナでも Neon 等のマネージドPostgresでも、接続文字列を変えるだけで動く。
 
 ---
 
@@ -28,15 +28,14 @@
 │
 ├── (1) リポジトリURL入力 / クイズ回答
 ▼
-[Firebase (Authentication / Firestore)]
-│
-├── (2) 認証・進捗データ同期
-▼
-[Cloud Run (Python FastAPI)] ◄── (3) GitHub APIからソースコード取得
+[Cloud Run (Python FastAPI)] ◄──┬── (2) 認証（自前JWT） / 進捗・トークン永続化
+│                                 ▼
+│                                [PostgreSQL（ローカル or Neon 等）]
+├── (3) GitHub APIからソースコード取得
 │
 ├── (4) コンテキスト整形・プロンプト構築
 ▼
-[Vertex AI (Gemini 1.5 Flash)] ── (5) 構造化JSON（クイズデータ）の返却
+[Gemini Developer API (gemini-3.5-flash)] ── (5) 構造化JSON（クイズ・ドキュメント）の返却
 
 ```
 
@@ -45,15 +44,15 @@
    * ユーザーインターフェースを提供。GitHubリポジトリのURL受付、クイズの出題（インタラクティブな穴埋めUI）、解答判定、スコア表示、学習履歴の可視化。
 2. **Backend (Cloud Run - Python/FastAPI)**:
    * GitHub API等を利用して指定されたリポジトリの主要なソースコード（`.py`, `.js`, `.go`など）をダウンロード・結合。
-   * Vertex AI SDK経由でGeminiモデルを呼び出し、構造化データ（JSON）としてクイズとドキュメントを取得・パース。
+   * Gemini Developer API 経由でGeminiモデルを呼び出し、構造化データ（JSON）としてクイズとドキュメントを取得・パース。
    * **クイズ生成とドキュメント生成は、取得済みソースを使い回して並行実行する**（`asyncio.gather`）。1回の呼び出しに両方を詰め込むと出力トークン上限でJSONが途中で切れやすいため、あえて別呼び出しにしている。
-3. **Database & Auth (Firebase)**:
-   * **Firebase Authentication**: ユーザーのサインイン・アカウント管理。
-   * **Cloud Firestore**: 生成されたクイズデータ（キャッシュ用）およびユーザーごとの解答履歴、正解率、苦手分野の保存。
-4. **AI Engine (Vertex AI)**:
-   * `gemini-1.5-flash`（または`gemini-1.5-pro`）を使用。Structured Outputs（スキーマ定義によるJSON強制出力）を利用し、アプリケーション側でパースしやすい形式でクイズを生成。
-5. **Repository Access (GitHub App)**:
-   * ログインユーザーがアクセスを許可したリポジトリ（プライベート含む）を読み取るための短命トークンを発行。
+3. **認証・DB（自前実装。GCP/Firebaseには依存しない）**:
+   * **認証**: メールアドレス + パスワード（bcryptでハッシュ化）。ログイン成功時にJWTを発行し、フロントエンドは `Authorization: Bearer <JWT>` として送る。
+   * **DB（PostgreSQL）**: ユーザー、暗号化したGitHubトークン、学習履歴、解析結果キャッシュ、ブランチ更新確認用のポインタを保存。SQLAlchemy(async) + asyncpg 経由。ローカル開発はDocker Composeのpostgresコンテナ、本番はNeon等のマネージドPostgresを想定（接続文字列を差し替えるだけ）。
+4. **AI Engine (Gemini)**:
+   * 既定では `gemini-3.5-flash` を使用（環境変数 `GEMINI_MODEL` で差し替え可能）。Structured Outputs（スキーマ定義によるJSON強制出力）を利用し、アプリケーション側でパースしやすい形式でクイズとドキュメントを生成。
+   * SDKは **`google-genai`**。接続処理は `backend/app/gemini.py` に集約している（後述）。
+   * **Vertex AI は使わない。** `genai.Client(api_key=...)` で ai.google.dev のGemini Developer APIを直接呼ぶ、APIキー1本の方式。DBや認証の設定とは完全に独立しており、それらが空でもGeminiだけは動く。
 
 ---
 
@@ -61,32 +60,36 @@
 
 本システムの**認証は任意**である。公開リポジトリの学習はログインなしで利用でき、ログインするとプライベートリポジトリの学習と学習履歴の保存が加わる。
 
-役割の異なる2つの仕組みを組み合わせている。
+「本人確認」と「リポジトリへのアクセス権」を意図的に分離している。
 
 | | 担当 | 得られるもの |
 |---|---|---|
-| Firebase Authentication（GitHubプロバイダ） | **本人確認** | Firebase UID、GitHubユーザートークン |
-| GitHub App のインストール | **リポジトリへのアクセス権** | installation ID → installation access token（1時間有効） |
+| メールアドレス + パスワード認証（自前実装） | **本人確認** | ユーザーID、JWT |
+| ユーザーが設定画面で入力する Personal Access Token | **リポジトリへのアクセス権** | 本人が発行したPAT |
+
+**GitHub SSO は採用していない。** 本人確認は通常のID/パスワード認証（`backend/app/auth.py`）で行い、GitHubログインには依存しない。プライベートリポジトリへのアクセスは、これとは別にユーザー自身が GitHub で発行した PAT を、アプリの設定画面に直接入力する方式にしている。サーバ側の環境変数として焼き込むトークンとは別物で、**1ユーザーにつき1本、本人しか持たない**。
 
 ### 認証フロー
 
 ```
-1. ユーザーが「GitHubでログイン」→ Firebase Auth (GitHubプロバイダ) でサインイン
-2. サインイン直後にしか取得できないGitHubユーザートークンを
-   POST /api/v1/github/link へ送り、KMSで暗号化してFirestoreに保存
-3. GET /api/v1/github/install-url で、uidを紐付けた署名付きstate付きの
-   インストールURLを取得し、ユーザーが対象リポジトリを選んでGitHub Appをインストール
-4. GitHubが /api/v1/github/setup-callback に installation_id と state を付けて戻す
-5. stateを検証してuidを復元し、users/{uid}.installations に記録
-6. 以降、クイズ生成時はそのインストールから installation access token を
-   都度発行してリポジトリを読む
+1. ユーザーが「ログイン」→ メールアドレス + パスワードで登録 or ログイン
+   （POST /api/v1/auth/register または /api/v1/auth/login）
+2. サーバがパスワードを検証し、JWT（有効期限30日、既定）を発行する
+3. フロントエンドはJWTを shared_preferences（Webではlocalstorage）に保存し、
+   以降 Authorization: Bearer <JWT> として送る。ブラウザを閉じても再ログイン不要
+4. アカウントメニューの「GitHubトークン」からPersonal Access Tokenを入力
+5. PUT /api/v1/github/token が GitHub 側でトークンの有効性を確認したうえで、
+   Fernetで暗号化してDBに保存する
+6. 以降、ログインしていればクイズ生成時に自動でこのトークンを使う
+7. ログアウトしても保存したPATは残り、再ログイン時に再入力は不要
 ```
 
-### トークンの扱い
+### パスワード・トークンの扱い
 
-* **GitHub App 秘密鍵** … Secret Manager に保管する唯一の長期秘密
-* **installation access token** … 1時間で失効する短命トークン。**永続化しない**（プロセス内メモリに期限までキャッシュするのみ）
-* **GitHub ユーザートークン** … Cloud KMS で暗号化して Firestore に保存。用途は「再ログインなしでインストール一覧を再取得する」ことのみ
+* **パスワード** … `bcrypt` でハッシュ化して保存する。平文はDBに一切残らない
+* **JWT** … `PyJWT`（HS256）で署名する。署名鍵は環境変数 `JWT_SECRET`
+* **サーバ共有の `GITHUB_TOKEN`**（環境変数） … 未ログインでの公開リポジトリ取得のみに使う。レートリミット緩和が目的で、個人のプライベートリポジトリへはアクセスできない
+* **ユーザー個別のPAT** … `cryptography.fernet` による対称鍵暗号化（鍵は環境変数 `ENCRYPTION_KEY`）でDBに保存する。**平文では保存しない**（暗号化鍵が未設定の場合は保存自体をスキップする）
 * いずれのトークンも**ログには出力しない**。GitHub APIのレスポンス本文をそのままクライアントへ返さない
 
 ## 2.4 冗長な処理の排除
@@ -97,11 +100,11 @@
 
 | 層 | 効く範囲 | 目的 |
 |---|---|---|
-| プロセス内メモリ | 単一インスタンス | 最も速い。Firestore未設定でも効く |
-| Firestore | 全インスタンス・全ユーザー | インスタンスをまたいで共有する |
+| プロセス内メモリ | 単一インスタンス | 最も速い。DB未設定でも効く |
+| PostgreSQL | 全インスタンス・全ユーザー | インスタンスをまたいで共有する |
 | single-flight | 同時実行中のリクエスト | 同じ生成が人数分走るのを防ぐ |
 
-Cloud Run は複数インスタンスに分散するためメモリだけでは共有を保証できず、逆に Firestore だけだと毎回読み取りが発生する。両方を重ねている。
+Cloud Run は複数インスタンスに分散するためメモリだけでは共有を保証できず、逆にDBだけだと毎回読み取りが発生する。両方を重ねている。
 
 ### 更新確認は段階的に、軽い問い合わせから
 
@@ -142,7 +145,7 @@ Cloud Run は複数インスタンスに分散するためメモリだけでは�
 | 別ブランチにpush（対象は不変） | 1 | 1 | なし | なし |
 | 対象ブランチが進んだ | 1 | 1 | あり | あり |
 
-ブランチ先頭のポインタは Firestore の `repository_heads` コレクション（`owner_repo_branch`）に保持する。解析結果とは別コレクションにして、軽い読み取りだけで済むようにしている。
+ブランチ先頭のポインタは PostgreSQL の `repository_heads` テーブル（`owner`/`repo`/`branch` の複合ユニークキー）に保持する。解析結果キャッシュ（`analysis_cache` テーブル）とは別テーブルにして、軽い読み取りだけで済むようにしている。
 
 ### 出題数とドキュメントの分離
 
@@ -165,130 +168,128 @@ private リポジトリの解析結果は**ユーザーごとにキャッシュ�
 
 ---
 
-## 3. データモデル設計 (Firestore)
+## 3. データモデル設計 (PostgreSQL)
 
-### 3.1 `repositories` コレクション
-リポジトリごとのクイズデータをキャッシュし、2回目以降のアクセスを高速化する。
+SQLAlchemy(async) のモデル定義は `backend/app/db.py` を参照。マイグレーションツール（Alembic等）は導入せず、起動時に `create_all` でテーブルを作成する単純な構成にしている。
+
+### 3.1 `users` テーブル
+
+ユーザーアカウントと、本人が入力したGitHubトークンを保持する。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `id` | UUID (PK) | |
+| `email` | string (unique) | ログインID |
+| `hashed_password` | string | bcryptハッシュ。平文は保存しない |
+| `display_name` | string, nullable | |
+| `github_login` | string, nullable | トークン確認時に取得したGitHubのアカウント名 |
+| `github_token_encrypted` | bytes, nullable | Fernetで暗号化した、ユーザー本人のPersonal Access Token |
+| `created_at` | timestamp | |
+
+### 3.2 `learning_progress` テーブル
+
+ユーザー×リポジトリごとの解答履歴。`(user_id, repository_id)` にユニーク制約。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `user_id` | UUID (FK → users.id) | |
+| `repository_id` | string | `owner_repo_コミットSHA` |
+| `total_answered` | int | |
+| `correct_count` | int | |
+| `last_accessed` | timestamp | |
+
+### 3.3 `repository_heads` テーブル
+
+ブランチごとに「最後に確認した状態」を保持する。これがあると、pushがない限りコミットSHAの問い合わせを省ける。`(owner, repo, branch)` にユニーク制約。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `owner` / `repo` / `branch` | string | |
+| `commit_sha` | string | 最後に確認した先頭コミット |
+| `pushed_at` | string, nullable | GitHubが返した値をそのまま保持 |
+| `checked_at` | timestamp | |
+
+### 3.4 `analysis_cache` テーブル
+
+リポジトリ（コミットSHA単位）ごとのクイズ・ドキュメントのキャッシュ。`(owner, repo, commit_sha)` にユニーク制約。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `owner` / `repo` / `commit_sha` | string | |
+| `url` | string | |
+| `visibility` | string | `public` / `private` |
+| `docs` | JSON | 逆引きドキュメントの索引（下記スキーマ） |
+| `sections_by_count` | JSON | 出題数(文字列キー)ごとの機能セクション一覧 |
+| `analyzed_at` | timestamp | |
+
+`sections_by_count` の各要素（1件の機能セクション）のスキーマ:
+
 ```json
 {
-  "repository_id": "string (owner_repo_コミットSHA)",
-  "url": "string",
-  "commit_sha": "string",
-  "visibility": "string (public | private)",
-  "analyzed_at": "timestamp",
-  "sections": [
+  "section_id": "string (UUID)",
+  "title": "string (機能セクション名)",
+  "description": "string (実務上どんな役割のコード群か)",
+  "quizzes": [
     {
-      "section_id": "string (UUID)",
-      "title": "string (機能セクション名)",
-      "description": "string (実務上どんな役割のコード群か)",
-      "quizzes": [
-        {
-          "quiz_id": "string (UUID)",
-          "file_path": "string (対象となったソースコードのパス)",
-          "scenario": "string (実務でこのコードに触る場面)",
-          "question_text": "string (穴埋め用のプレースホルダー [BLANK] を含むテキスト)",
-          "code_snippet": "string (関連するコード断片。穴埋め箇所は ___ 表現)",
-          "choices": ["string", "string", "string", "string"],
-          "correct_answer": "string",
-          "explanation": "string (なぜその答えになるのか、コードのどの部分に依存しているかの解説)"
-        }
-      ]
+      "quiz_id": "string (UUID)",
+      "file_path": "string (対象となったソースコードのパス)",
+      "scenario": "string (実務でこのコードに触る場面)",
+      "question_text": "string (穴埋め用のプレースホルダー [BLANK] を含むテキスト)",
+      "code_snippet": "string (関連するコード断片。穴埋め箇所は ___ 表現)",
+      "choices": ["string", "string", "string", "string"],
+      "correct_answer": "string",
+      "explanation": "string (なぜその答えになるのか、コードのどの部分に依存しているかの解説)"
     }
   ]
 }
-
 ```
 
-同じドキュメントの `docs` フィールドに、逆引きドキュメントの索引を保存する。
+`docs` の各要素（1件の逆引きドキュメント）のスキーマ:
 
 ```json
 {
-  "docs": [
+  "doc_id": "string (UUID)",
+  "kind": "string (feature | symbol | task | file)",
+  "title": "string (検索でそのまま入力されうる語)",
+  "summary": "string (1〜2文。検索結果一覧に表示する)",
+  "body": "string (本文。段落は空行2つで区切る)",
+  "file_paths": ["string"],
+  "symbols": ["string (関連する関数名・クラス名)"],
+  "tags": ["string (日本語・英語の別名を含む検索キーワード)"],
+  "code_refs": [
     {
-      "doc_id": "string (UUID)",
-      "kind": "string (feature | symbol | task | file)",
-      "title": "string (検索でそのまま入力されうる語)",
-      "summary": "string (1〜2文。検索結果一覧に表示する)",
-      "body": "string (本文。段落は空行2つで区切る)",
-      "file_paths": ["string"],
-      "symbols": ["string (関連する関数名・クラス名)"],
-      "tags": ["string (日本語・英語の別名を含む検索キーワード)"],
-      "code_refs": [
-        {
-          "file_path": "string",
-          "snippet": "string (穴埋めしない原文のコード)",
-          "note": "string (その断片が何をしているかの1文)"
-        }
-      ],
-      "related_section_titles": ["string (対応するクイズのセクション名)"]
+      "file_path": "string",
+      "snippet": "string (穴埋めしない原文のコード)",
+      "note": "string (その断片が何をしているかの1文)"
     }
-  ]
+  ],
+  "related_section_titles": ["string (対応するクイズのセクション名)"]
 }
 ```
 
-ドキュメントIDはブランチ名ではなく**コミットSHA**を含める。ブランチが進んだときに古いクイズが返り続けるのを防ぐため。
+行のキーはブランチ名ではなく**コミットSHA**を含める。ブランチが進んだときに古いクイズが返り続けるのを防ぐため。
 
-`docs` フィールドは後から追加されたため、**これを持たない古いキャッシュを読んでも壊れないよう、バックエンド・フロントエンドとも既定値を空リストにしている。**
+`docs` は後から追加されたフィールドのため、**これを持たない古いキャッシュ行を読んでも壊れないよう、バックエンド・フロントエンドとも既定値を空リストにしている。**
 
-**キャッシュのスコープ**: `visibility` が `private` のドキュメントは、**返却のたびに呼び出し元が当該リポジトリへのアクセス権を持つかを再確認**してから返す。ユーザーごとにドキュメントを分けるのではなく都度確認する方式にしているのは、GitHub側でインストールを外された後もキャッシュが返り続ける事故を防ぐため。
+**キャッシュのスコープ**: `visibility` が `private` の行は、**返却のたびに呼び出し元が現在有効なGitHubトークンを持つかを再確認**してから返す。ユーザーごとに行を分けるのではなく都度確認する方式にしているのは、設定画面からトークンを削除した後もキャッシュが返り続ける事故を防ぐため。
 
-### 3.2 `users` コレクション
-
-ユーザーの学習進捗を管理する。
-
-```json
-{
-  "uid": "string (Firebase Auth UID)",
-  "email": "string",
-  "display_name": "string",
-  "created_at": "timestamp",
-  "github_login": "string (GitHubのアカウント名)",
-  "installations": ["number (GitHub App の installation ID)"],
-  "github_user_token_encrypted": "bytes (Cloud KMSで暗号化したGitHubユーザートークン)",
-  "learning_progress": {
-    "repository_id_1": {
-      "total_answered": "number",
-      "correct_count": "number",
-      "last_accessed": "timestamp"
-    }
-  }
-}
-
-```
-
-### 3.3 `repository_heads` コレクション
-
-ブランチごとに「最後に確認した状態」を保持する。これがあると、pushがない限りコミットSHAの問い合わせを省ける。
-
-```json
-{
-  "owner": "string",
-  "repo": "string",
-  "branch": "string",
-  "commit_sha": "string (最後に確認した先頭コミット)",
-  "pushed_at": "string (GitHubが返した値をそのまま保持)",
-  "checked_at": "timestamp"
-}
-```
-
-ドキュメントIDは `owner_repo_branch`。解析結果（`repositories`）とは別コレクションにして、更新確認が軽い読み取りだけで済むようにしている。
-
-**Firestore セキュリティルールでは、クライアントからの直接アクセスを全面的に拒否する。** 読み書きはすべてバックエンド（Admin SDK）経由に限定する。これによりフロントエンドはFirestore SDKを持つ必要がなく、`github_user_token_encrypted` のような機微なフィールドがクライアントに露出する経路も存在しなくなる。
+**DBへのアクセスはバックエンドのみが行う。** フロントエンドは接続情報を一切持たず、必ずAPI（`Authorization: Bearer <JWT>`）経由でやり取りする。これにより `github_token_encrypted` や `hashed_password` のような機微なカラムがクライアントに露出する経路は存在しない。
 
 ---
 
 ## 4. APIエンドポイント設計 (Cloud Run)
 
-認証は `Authorization: Bearer <Firebase ID トークン>` で行う。
+認証は `Authorization: Bearer <JWT>` で行う（JWTは `/api/v1/auth/register` または `/api/v1/auth/login` が発行する）。
 
 | メソッド | パス | 認証 | 内容 |
 |---|---|---|---|
-| POST | `/api/v1/quiz/generate` | **任意** | クイズ生成。認証があればプライベートリポジトリも対象になる |
-| GET | `/api/v1/me` | 必須 | アカウント情報とGitHub連携の状態 |
-| POST | `/api/v1/github/link` | 必須 | GitHubユーザートークンを預けてインストール一覧を同期 |
-| GET | `/api/v1/github/install-url` | 必須 | GitHub App のインストールURLを取得 |
-| GET | `/api/v1/github/setup-callback` | — | インストール完了後のGitHubからのリダイレクト受け口 |
-| GET | `/api/v1/repositories` | 必須 | アクセスを許可されたリポジトリ一覧 |
+| POST | `/api/v1/auth/register` | — | メールアドレス + パスワードで新規登録。JWTを返す |
+| POST | `/api/v1/auth/login` | — | ログイン。JWTを返す |
+| POST | `/api/v1/quiz/generate` | **任意** | クイズ生成。認証があれば保存済みトークンでプライベートリポジトリも対象になる |
+| GET | `/api/v1/me` | 必須 | アカウント情報とGitHubトークンの設定状況 |
+| PUT | `/api/v1/github/token` | 必須 | Personal Access Tokenを検証したうえで暗号化保存 |
+| DELETE | `/api/v1/github/token` | 必須 | 保存済みトークンを削除 |
+| GET | `/api/v1/repositories` | 必須 | 保存済みトークンでアクセスできるリポジトリ一覧 |
 | POST | `/api/v1/progress/answer` | 必須 | 1問回答するごとの記録 |
 | GET | `/api/v1/progress` | 必須 | 学習履歴の取得 |
 
@@ -309,7 +310,7 @@ private リポジトリの解析結果は**ユーザーごとにキャッシュ�
 ```
 
 
-* **Response Body**: `repositories` コレクションのスキーマに準拠したJSON。
+* **Response Body**: `analysis_cache` テーブルのスキーマに準拠したJSON。
 * **エラー**: `400` URL形式不正 / `403` リポジトリを読む権限がない / `404` リポジトリまたはブランチが存在しない / `429` GitHub APIのレートリミット到達
 * レスポンスの `cached` は、キャッシュから返したかどうかを示す（動作確認・運用時の切り分け用）
 
@@ -319,7 +320,7 @@ private リポジトリの解析結果は**ユーザーごとにキャッシュ�
 
 ## 5. AIプロンプト・エンジニアリング & スキーマ設計
 
-Vertex AI への入力プロンプトには、ソースコードの文字列とともに、以下の指示（システムインストラクション）を埋め込む。さらに、出力形式を厳密に制御するために **Structured Outputs (JSON Schema)** を定義する。
+Geminiへの入力プロンプトには、ソースコードの文字列とともに、以下の指示（システムインストラクション）を埋め込む。さらに、出力形式を厳密に制御するために **Structured Outputs (JSON Schema)** を定義する。
 
 ### 5.1 システムプロンプト（System Instruction）
 
@@ -364,6 +365,46 @@ Structured Outputs で強制する出力スキーマは、`quizzes` を要素と
 
 実装は `backend/app/quiz_generator.py` を参照。
 
+### 5.4 SDKと接続方式の選定
+
+**SDKは `google-genai` を使う。** 旧 `vertexai.generative_models`（`google-cloud-aiplatform` に含まれる）は2025年6月24日に非推奨化され、**2026年6月24日に削除された**。新しいGeminiモデルは `google-genai` からしか利用できない。
+
+**接続方式は Vertex AI ではなく Gemini Developer API（APIキー1本）を選んでいる。**
+
+| | Gemini Developer API（採用） | Vertex AI |
+|---|---|---|
+| 認証 | `GEMINI_API_KEY` 1本 | GCPプロジェクト + IAM（サービスアカウント） |
+| GCPプロジェクトの要否 | 不要 | 必須 |
+| 向き | Gemini単体をシンプルに使う | 他のGCPサービスと権限・課金をまとめたい場合 |
+
+このプロジェクトでは PostgreSQL や JWT はログイン機能のためだけに使っており、**AIの利用自体はそれらと切り離せる**。`GEMINI_API_KEY` さえあれば、DBもGCPプロジェクトもなしでクイズ・ドキュメント生成が動く（ログイン機能を使わないなら `DATABASE_URL` / `JWT_SECRET` は一切不要）。
+
+`google-genai` の SDK は同じでも、初期化方法が異なる。
+
+```python
+# 採用: Gemini Developer API
+genai.Client(api_key=settings.gemini_api_key)
+
+# 不採用: Vertex AI
+genai.Client(vertexai=True, project=..., location=...)
+```
+
+接続処理は `backend/app/gemini.py` の `generate_json()` に集約している。クイズ生成とドキュメント生成の両方がここを経由するため、SDKや接続方式の差し替えはこの1ファイルで完結する。
+
+呼び出しは同期版ではなく `client.aio.models.generate_content` を使う。クイズとドキュメントを `asyncio.gather` で並行実行するため、イベントループを塞いではいけない。
+
+#### モデルIDは環境変数で差し替える
+
+Geminiのモデルは定期的に廃止される。実際に次のことが起きている。
+
+| 世代 | 状況 |
+|---|---|
+| Gemini 1.5 系 | **廃止済み**（404を返す） |
+| Gemini 2.5 系 | 2026年10月16日に廃止予定 |
+| Gemini 3.x 系 | 現行 |
+
+そのためモデルIDをコードに直書きせず、環境変数 `GEMINI_MODEL` で指定する（未設定時は `gemini-3.5-flash`）。**次の廃止時に必要なのは設定変更だけで、コード変更もデプロイ内容の見直しも要らない。**
+
 ---
 
 ## 6. セキュリティ・運用要件
@@ -376,22 +417,25 @@ Structured Outputs で強制する出力スキーマは、`quizzes` を要素と
 * 「2.4 冗長な処理の排除」を参照。同一リポジトリ・同一コミットへのリクエストは、ユーザーをまたいで解析結果を共有する。
 
 
-3. **IAM権限の最小化**:
-* Cloud Runのサービスアカウントには以下のみを付与する。
-  * `roles/aiplatform.user`（Vertex AI）
-  * `roles/datastore.user`（Firestore）
-  * `roles/cloudkms.cryptoKeyEncrypterDecrypter`（GitHubユーザートークンの暗号化）
-  * `roles/secretmanager.secretAccessor`（GitHub App秘密鍵の読み取り）
+3. **Geminiの認証情報の扱い**:
+* `GEMINI_API_KEY` は他のシークレットと同様、環境変数へ直書きせず Secret Manager 経由で Cloud Run に注入する。GCPのIAMロールとは無関係（Vertex AIを使っていないため `roles/aiplatform.user` は不要）。
 
 
-4. **GitHub App の権限最小化**:
-* GitHub App に付与する権限は `Repository permissions > Contents: Read-only` のみとする。ユーザーは学習したいリポジトリだけを個別に選んで許可でき、それ以外のリポジトリは読み取れない。
+4. **認証情報の管理**（ログイン機能を使う場合）:
+* `DATABASE_URL` / `JWT_SECRET` / `ENCRYPTION_KEY` は他のシークレットと同様、環境変数へ直書きせず Secret Manager 等の秘密管理サービス経由で注入する。GCPのIAMロールとは無関係（自前実装のためGCP固有の権限は一切不要）。
+* `JWT_SECRET` は複数インスタンスで同じ値を共有する必要がある（インスタンスごとに異なると、あるインスタンスで発行したJWTが他のインスタンスで検証できない）。
 
 
-5. **プライベートコードの取り扱い**:
-* プライベートリポジトリのソースコードは、クイズ・ドキュメント生成のため Vertex AI に送信される。リポジトリ選択画面でこの旨をユーザーに明示している。
+5. **ユーザーのGitHubトークンの扱い**:
+* ユーザーが入力するPersonal Access Tokenは、サーバの環境変数には一切保存しない。設定画面から個別に入力させ、GitHub側で有効性を確認したうえで `cryptography.fernet` で暗号化してDBに保存する。
+* 権限は読み取り専用（classicなら `repo`、fine-grainedなら対象リポジトリの `Contents: Read-only`）で発行するようUIで案内する。
+* ユーザーは設定画面からいつでもトークンを削除できる。
+
+
+6. **プライベートコードの取り扱い**:
+* プライベートリポジトリのソースコードは、クイズ・ドキュメント生成のため Gemini（Gemini Developer API）に送信される。リポジトリ選択画面でこの旨をユーザーに明示している。
 * **ドキュメントはクイズと違い、コードを穴埋めせず原文のまま引用する。** そのためキャッシュのアクセス権再確認（`visibility: private` の都度確認）はクイズ以上に重要であり、この判定を緩めてはならない。
 
 
-6. **CORS**:
-* 許可オリジンは `FRONTEND_ORIGIN` で指定する。未指定時は開発用に全許可（`*`）となるため、**本番では必ず Firebase Hosting のドメインを設定する**。
+7. **CORS**:
+* 許可オリジンは `FRONTEND_ORIGIN` で指定する。未指定時は開発用に全許可（`*`）となるため、**本番では必ずフロントエンドの配信ドメインを設定する**。
