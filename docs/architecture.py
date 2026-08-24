@@ -47,15 +47,18 @@ with Diagram(
         frontend >> Edge(label="(2) 認証") >> auth
         frontend >> Edge(label="進捗同期") >> firestore
 
-    with Cluster("Google Cloud"):
+    with Cluster("Google Cloud（ログイン機能用。GEMINI_API_KEYのみの場合は不要）"):
         backend = Run("Cloud Run\nPython / FastAPI\nPOST /api/v1/quiz/generate")
-        vertex = VertexAI("Vertex AI\ngemini-1.5-flash\nStructured Outputs")
-        secret = SecretManager("Secret Manager\nGITHUB_TOKEN")
+        secret = SecretManager("Secret Manager\nGITHUB_TOKEN\nGEMINI_API_KEY")
 
-        backend >> Edge(label="(4) プロンプト構築") >> vertex
-        vertex >> Edge(label="(5) 構造化JSON", style="dashed") >> backend
         backend >> Edge(label="PAT参照", style="dotted") >> secret
         backend >> Edge(label="キャッシュ読み書き", style="dashed") >> firestore
+
+    # Vertex AIではなく、APIキー1本のGemini Developer APIを使う。
+    # GCPプロジェクトとは無関係な別サービスであることを示すため、Google Cloudクラスタの外に置く。
+    gemini = VertexAI("Gemini Developer API\ngemini-3.5-flash\nAPIキー認証・Structured Outputs")
+    backend >> Edge(label="(4) プロンプト構築") >> gemini
+    gemini >> Edge(label="(5) 構造化JSON", style="dashed") >> backend
 
     github = Github("GitHub API\nソースコード取得")
 
