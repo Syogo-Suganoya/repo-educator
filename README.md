@@ -1,4 +1,4 @@
-# システム基本設計書：GitHubリポジトリ自動解析・AI学習支援サービス
+# GitHubリポジトリ自動解析・AI学習支援サービス
 
 ![Flutter](https://img.shields.io/badge/Flutter-Web-02569B?logo=flutter&logoColor=white)
 ![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart&logoColor=white)
@@ -356,7 +356,7 @@ Geminiへの入力プロンプトには、ソースコードの文字列とと�
 
 ### 5.2 逆引きドキュメントの設計
 
-ドキュメントは**「何で引くか」の4つの粒度**で索引を作る。同じコードでも、探し方は人によって違うため。
+ドキュメントは、**「何で引くか」の4つの粒度**で索引を作る。同じコードでも、探し方は人によって違うため。
 
 | kind | 何で引くか | 例 |
 |---|---|---|
