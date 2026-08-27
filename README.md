@@ -1,5 +1,15 @@
 # システム基本設計書：GitHubリポジトリ自動解析・AI学習支援サービス
 
+![Flutter](https://img.shields.io/badge/Flutter-Web-02569B?logo=flutter&logoColor=white)
+![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Gemini](https://img.shields.io/badge/Gemini-3.5%20Flash-8E75B2?logo=googlegemini&logoColor=white)
+![Cloud Run](https://img.shields.io/badge/Cloud%20Run-4285F4?logo=googlecloud&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
+
 ## 1. システム概要
 本システムは、ユーザーが指定したGitHubリポジトリ（またはソースコード群）を自動で解析し、そのコードの重要な概念、アルゴリズム、アーキテクチャ、言語仕様に関する **「穴埋めクイズ」** と **「逆引きドキュメント」** を自動生成する学習支援プラットフォームである。
 
@@ -10,34 +20,16 @@
 | **穴埋めクイズ** | コードを読む力を鍛える | 腰を据えて理解を深めたいとき |
 | **逆引きドキュメント** | 知りたいことに最短でたどり着く | 「この機能はどこ？」を今すぐ知りたいとき |
 
-### 1.1 開発要件への適合
-* **Google Cloud アプリケーション実行プロダクト**: **Cloud Run** を採用（コンテナベースの柔軟性とリクエスト課金によるコスト最適化）。
-* **AI技術**: **Gemini**（既定 `gemini-3.5-flash`）を採用。広大なコンテキストウィンドウを活かし、複数ファイルを丸ごと解析する。呼び出しは **Gemini Developer API（APIキー1本）** で行い、AIの利用に GCP プロジェクトを必要としない構成にしている（詳細は 2.2 参照）。
-* **その他の技術（任意）**: フロントエンドに **Flutter (Web)**。ログイン機能・データ永続化は **FastAPI + JWT + PostgreSQL** で実装する。DBは Docker Compose のローカルコンテナでも Neon 等のマネージドPostgresでも、接続文字列を変えるだけで動く。
-
 ---
 
 ## 2. システムアーキテクチャ
 システム全体の構成およびデータフローを以下に示す。
 
-### 2.1 アーキテクチャ構成図（概念）
+### 2.1 アーキテクチャ構成図
 
-```
+![アーキテクチャ](docs/architecture.png)
 
-[ユーザー (Flutter Web)]
-│
-├── (1) リポジトリURL入力 / クイズ回答
-▼
-[Cloud Run (Python FastAPI)] ◄──┬── (2) 認証（自前JWT） / 進捗・トークン永続化
-│                                 ▼
-│                                [PostgreSQL（ローカル or Neon 等）]
-├── (3) GitHub APIからソースコード取得
-│
-├── (4) コンテキスト整形・プロンプト構築
-▼
-[Gemini Developer API (gemini-3.5-flash)] ── (5) 構造化JSON（クイズ・ドキュメント）の返却
-
-```
+図の生成は [docs/architecture.py](docs/architecture.py)（`diagrams` + graphviz）。構成を変えたらこのスクリプトを実行して `docs/architecture.png` を更新する。
 
 ### 2.2 コンポーネントの役割
 1. **Frontend (Flutter Web)**:
@@ -67,7 +59,9 @@
 | メールアドレス + パスワード認証（自前実装） | **本人確認** | ユーザーID、JWT |
 | ユーザーが設定画面で入力する Personal Access Token | **リポジトリへのアクセス権** | 本人が発行したPAT |
 
-本人確認はメールアドレス + パスワード認証（`backend/app/auth.py`）で行う。プライベートリポジトリへのアクセスは、これとは別にユーザー自身が GitHub で発行した PAT を、アプリの設定画面に直接入力する方式にしている。サーバ側の環境変数として焼き込むトークンとは別物で、**1ユーザーにつき1本、本人しか持たない**。
+本人確認はメールアドレス + パスワード認証（`backend/app/auth.py`）で行う。プライベートリポジトリへのアクセスは、これとは別にユーザー自身が GitHub で発行した PAT を、アプリの設定画面に直接入力する方式にしている。サーバ側の環境変数として焼き込むトークンとは別物で、**本人しか持たない**。
+
+PATは**1ユーザーにつき複数登録できる**。fine-grained PAT は発行時に選んだリポジトリしか読めないため、複数の組織やアカウントにまたがると1本では足りないからである。どのトークンでどのリポジトリを読むかはサーバ側が総当たりで見つけ、成功した組み合わせを `repository_token_bindings` に記録して次回以降はそれを先に試す。ユーザーがGitHub側で権限を変更して失敗するようになったら、記録を捨てて総当たりからやり直す。
 
 ### 認証フロー
 
@@ -78,9 +72,10 @@
 3. フロントエンドはJWTを shared_preferences（Webではlocalstorage）に保存し、
    以降 Authorization: Bearer <JWT> として送る。ブラウザを閉じても再ログイン不要
 4. アカウントメニューの「GitHubトークン」からPersonal Access Tokenを入力
-5. PUT /api/v1/github/token が GitHub 側でトークンの有効性を確認したうえで、
-   Fernetで暗号化してDBに保存する
-6. 以降、ログインしていればクイズ生成時に自動でこのトークンを使う
+5. POST /api/v1/github/tokens が GitHub 側でトークンの有効性を確認したうえで、
+   Fernetで暗号化してDBに保存する（複数登録可。GET / DELETE で一覧・削除）
+6. 以降、ログインしていればクイズ生成時に、登録済みトークンのうち
+   そのリポジトリを読めるものをサーバが自動で選んで使う
 7. ログアウトしても保存したPATは残り、再ログイン時に再入力は不要
 ```
 
@@ -172,55 +167,75 @@ private リポジトリの解析結果は**ユーザーごとにキャッシュ�
 
 SQLAlchemy(async) のモデル定義は `backend/app/db.py` を参照。マイグレーションツール（Alembic等）は導入せず、起動時に `create_all` でテーブルを作成する単純な構成にしている。
 
-### 3.1 `users` テーブル
+```mermaid
+erDiagram
+    users ||--o{ learning_progress : "解答履歴"
+    users ||--o{ generation_history : "生成履歴"
 
-ユーザーアカウントと、本人が入力したGitHubトークンを保持する。
+    users {
+        uuid id PK
+        string email UK "ログインID"
+        string hashed_password "bcryptハッシュ。平文は保存しない"
+        string display_name "nullable"
+        string github_login "nullable。トークン確認時に取得したGitHubアカウント名"
+        bytes github_token_encrypted "nullable。Fernetで暗号化した本人のPAT"
+        timestamp created_at
+    }
 
-| カラム | 型 | 説明 |
+    learning_progress {
+        int id PK
+        uuid user_id FK
+        string repository_id "owner_repo_コミットSHA"
+        int total_answered
+        int correct_count
+        timestamp last_accessed
+    }
+
+    generation_history {
+        int id PK
+        uuid user_id FK
+        string repository_url
+        string branch
+        string repository_id
+        int section_count
+        int quiz_count
+        timestamp last_opened
+    }
+
+    repository_heads {
+        int id PK
+        string owner
+        string repo
+        string branch
+        string commit_sha "最後に確認した先頭コミット"
+        string pushed_at "nullable。GitHubが返した値をそのまま保持"
+        timestamp checked_at
+    }
+
+    analysis_cache {
+        int id PK
+        string owner
+        string repo
+        string commit_sha
+        string url
+        string visibility "public / private"
+        json docs "逆引きドキュメントの索引"
+        json sections_by_count "出題数(文字列キー)ごとの機能セクション一覧"
+        timestamp analyzed_at
+    }
+```
+
+ユニーク制約と、各テーブルを置いている理由は次のとおり。
+
+| テーブル | ユニーク制約 | 役割 |
 |---|---|---|
-| `id` | UUID (PK) | |
-| `email` | string (unique) | ログインID |
-| `hashed_password` | string | bcryptハッシュ。平文は保存しない |
-| `display_name` | string, nullable | |
-| `github_login` | string, nullable | トークン確認時に取得したGitHubのアカウント名 |
-| `github_token_encrypted` | bytes, nullable | Fernetで暗号化した、ユーザー本人のPersonal Access Token |
-| `created_at` | timestamp | |
+| `users` | `email` | アカウントと、本人が入力したGitHubトークン |
+| `learning_progress` | `(user_id, repository_id)` | ユーザー×リポジトリごとの解答履歴 |
+| `generation_history` | `(user_id, repository_url, branch)` | 生成したクイズを開き直すための履歴。クイズの中身は持たない |
+| `repository_heads` | `(owner, repo, branch)` | 「最後に確認した状態」。pushがない限りコミットSHAの問い合わせを省ける |
+| `analysis_cache` | `(owner, repo, commit_sha)` | コミット単位のクイズ・ドキュメントのキャッシュ |
 
-### 3.2 `learning_progress` テーブル
-
-ユーザー×リポジトリごとの解答履歴。`(user_id, repository_id)` にユニーク制約。
-
-| カラム | 型 | 説明 |
-|---|---|---|
-| `user_id` | UUID (FK → users.id) | |
-| `repository_id` | string | `owner_repo_コミットSHA` |
-| `total_answered` | int | |
-| `correct_count` | int | |
-| `last_accessed` | timestamp | |
-
-### 3.3 `repository_heads` テーブル
-
-ブランチごとに「最後に確認した状態」を保持する。これがあると、pushがない限りコミットSHAの問い合わせを省ける。`(owner, repo, branch)` にユニーク制約。
-
-| カラム | 型 | 説明 |
-|---|---|---|
-| `owner` / `repo` / `branch` | string | |
-| `commit_sha` | string | 最後に確認した先頭コミット |
-| `pushed_at` | string, nullable | GitHubが返した値をそのまま保持 |
-| `checked_at` | timestamp | |
-
-### 3.4 `analysis_cache` テーブル
-
-リポジトリ（コミットSHA単位）ごとのクイズ・ドキュメントのキャッシュ。`(owner, repo, commit_sha)` にユニーク制約。
-
-| カラム | 型 | 説明 |
-|---|---|---|
-| `owner` / `repo` / `commit_sha` | string | |
-| `url` | string | |
-| `visibility` | string | `public` / `private` |
-| `docs` | JSON | 逆引きドキュメントの索引（下記スキーマ） |
-| `sections_by_count` | JSON | 出題数(文字列キー)ごとの機能セクション一覧 |
-| `analyzed_at` | timestamp | |
+`repository_heads` と `analysis_cache` はユーザーに紐づかない。同じコミットの解析結果は誰が開いても同じなので、**利用者をまたいで共有する**（「2.4 冗長な処理の排除」参照）。ただしprivateリポジトリの結果を返す前には、毎回アクセス権を確認する。
 
 `sections_by_count` の各要素（1件の機能セクション）のスキーマ:
 
@@ -286,10 +301,13 @@ SQLAlchemy(async) のモデル定義は `backend/app/db.py` を参照。マイ�
 | POST | `/api/v1/auth/register` | — | メールアドレス + パスワードで新規登録。JWTを返す |
 | POST | `/api/v1/auth/login` | — | ログイン。JWTを返す |
 | POST | `/api/v1/quiz/generate` | **任意** | クイズ生成。認証があれば保存済みトークンでプライベートリポジトリも対象になる |
+| POST | `/api/v1/docs/ask` | **任意** | リポジトリについての質問に、実際のソースを根拠に回答する |
 | GET | `/api/v1/me` | 必須 | アカウント情報とGitHubトークンの設定状況 |
 | PUT | `/api/v1/github/token` | 必須 | Personal Access Tokenを検証したうえで暗号化保存 |
 | DELETE | `/api/v1/github/token` | 必須 | 保存済みトークンを削除 |
-| GET | `/api/v1/repositories` | 必須 | 保存済みトークンでアクセスできるリポジトリ一覧 |
+| GET | `/api/v1/repositories` | 必須 | 保存済みトークンで読めるプライベートリポジトリ一覧 |
+| GET | `/api/v1/history` | 必須 | 生成したクイズの履歴（新しい順） |
+| DELETE | `/api/v1/history` | 必須 | 履歴を1件削除 |
 | POST | `/api/v1/progress/answer` | 必須 | 1問回答するごとの記録 |
 | GET | `/api/v1/progress` | 必須 | 学習履歴の取得 |
 
@@ -425,3 +443,38 @@ Geminiのモデルは定期的に廃止される。実際に次のことが起�
 
 7. **CORS**:
 * 許可オリジンは `FRONTEND_ORIGIN` で指定する。未指定時は開発用に全許可（`*`）となるため、**本番では必ずフロントエンドの配信ドメインを設定する**。
+
+
+## 7. 今後の展望：GitHubアカウントでのサインイン（SSO）
+
+現在の構成は「メールアドレス + パスワードで本人確認」「PATでリポジトリのアクセス権」という二段構えである（「2.3 認証とリポジトリアクセス」）。ここを **GitHub App によるサインイン**に置き換えることを次の一歩として想定している。
+
+### 何が解決されるか
+
+| 現在の課題 | SSO導入後 |
+|---|---|
+| PATの発行手順が最大の離脱点。取得手順の説明モーダルを用意しなければ使い始められない | 「GitHubでサインイン」の1クリック。発行手順そのものが消える |
+| fine-grained PAT は選んだリポジトリしか読めず、複数登録・総当たり・バインディング記録という仕組みが必要 | インストール時にユーザーがリポジトリを選ぶ。どのトークンを使うかという問題自体がなくなる |
+| PATを暗号化してDBに長期保管する（失効はユーザー任せ） | 短命のアクセストークン + リフレッシュトークン。ユーザーがGitHub側でアプリを削除すれば即座に失効する |
+| パスワードのハッシュ・リセット・使い回しリスクを自前で抱える | 認証情報を保持しない。パスワードリセット導線が不要になる |
+| 組織が **SAML SSO** を強制している場合、PATは個別に「Configure SSO」で認可しないと使えず、手順がさらに増える | 組織管理者が一度インストールすれば、所属メンバーは追加の認可作業なしに使える |
+| ユーザーの表示名がメールアドレスしかない | アバター・GitHubログイン名をそのまま使える |
+
+加えて、GitHub App では **Webhook** を受け取れる。push を契機にキャッシュを事前に温めておけば、「クイズを始める」を押した時点ですでに生成が終わっている状態を作れる。
+
+> **用語の注意**: GitHub まわりの「SSO」は二つの意味で使われる。ここで導入対象とするのは (a) *Sign in with GitHub*（OAuth によるサインイン）である。(b) 組織が強制する *SAML SSO* は GitHub 側の機能で、こちらは (a) を入れることで対処が楽になる、という関係にある。
+
+### OAuth App ではなく GitHub App を選ぶ理由
+
+OAuth App の `repo` スコープは**全プライベートリポジトリへの読み書き**という粗い粒度しかない。学習のために読むだけのアプリが書き込み権限まで要求するのは過剰である。GitHub App ならインストール単位でリポジトリを選べ、権限も `Contents: Read-only` まで絞れる。これは現在PATの発行案内で求めている権限（「6. セキュリティ・運用要件」5項）と同じ粒度であり、方針を変えずに移行できる。
+
+### 実装の見通し
+
+* **DB** … `users` に `github_user_id` / `github_login` / `avatar_url` を追加。`password_hash` は NULL 許容にして、既存のメール認証ユーザーと併存させる。`github_tokens` は GitHub App のインストールトークンを持つ形に寄せていく
+* **バックエンド** … `/api/v1/auth/github/start` と `/api/v1/auth/github/callback` を追加。`state` を CSRF 対策として保持し、コールバックで受け取ったコードをアクセストークンに交換して、既存と同じ JWT を発行する。**JWT を発行する部分から先は現在の実装がそのまま使える**
+* **シークレット** … `GITHUB_APP_ID` / `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_APP_PRIVATE_KEY` を Secret Manager に追加する
+* **フロントエンド** … ログインダイアログに「GitHubでサインイン」を追加。PAT入力欄は当面残す（GitHub App を組織にインストールできない立場のユーザーがいるため）
+
+### 移行の考え方
+
+既存のメール/パスワードのユーザーを壊さないため、**両方の認証手段を併存させる**。同一メールアドレスで GitHub サインインしたときにアカウントを自動で結合するかどうかは、なりすましのリスクがあるため慎重に決める必要がある（GitHub 側でメールが検証済みかを確認したうえで、明示的な結合操作を求めるのが安全）。

@@ -11,13 +11,23 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.analysis_cache import AnalysisResult, HeadRef
 from app.config import settings
 from app.crypto import decrypt, encrypt
-from app.db import AnalysisCache, LearningProgress, RepositoryHead, User, get_session_factory
+from app.db import (
+    AnalysisCache,
+    GenerationHistory,
+    GithubToken,
+    LearningProgress,
+    RepositoryHead,
+    RepositoryTokenBinding,
+    User,
+    _utcnow,
+    get_session_factory,
+)
 from app.schemas import DocEntry, FeatureSection
 
 logger = logging.getLogger(__name__)
@@ -77,8 +87,32 @@ async def get_user_dict(uid: str) -> dict[str, Any] | None:
     }
 
 
-async def save_github_user_token(uid: str, token: str, *, github_login: str | None = None) -> bool:
-    """ユーザーが自分で入力したGitHub PATを暗号化して保存する。
+async def _migrate_legacy_token(session, user: User) -> None:
+    """旧仕様（1ユーザー1トークン）で users 列に入っていた分を github_tokens へ移す。
+
+    マイグレーションツールを入れていないため、読み出しの入口で一度だけ移し替える。
+    移し終えたら元の列は空にするので、2回目以降は何もしない。
+    """
+    if user.github_token_encrypted is None:
+        return
+    session.add(
+        GithubToken(
+            user_id=user.id,
+            github_login=user.github_login,
+            token_encrypted=user.github_token_encrypted,
+        )
+    )
+    user.github_token_encrypted = None
+
+
+async def add_github_token(
+    uid: str,
+    token: str,
+    *,
+    github_login: str | None = None,
+    label: str | None = None,
+) -> bool:
+    """ユーザーが入力したGitHub PATを暗号化して追加する。
 
     ログアウト後も残るよう、環境変数やセッションではなくDBに保存する。
     暗号化できなければ保存しない（平文保存はしない）。戻り値は保存できたかどうか。
@@ -94,36 +128,147 @@ async def save_github_user_token(uid: str, token: str, *, github_login: str | No
             user = await session.get(User, uuid.UUID(uid))
             if user is None:
                 return False
-            user.github_token_encrypted = ciphertext
-            if github_login:
-                user.github_login = github_login
+            await _migrate_legacy_token(session, user)
+            session.add(
+                GithubToken(
+                    user_id=user.id,
+                    github_login=github_login,
+                    label=label,
+                    token_encrypted=ciphertext,
+                )
+            )
             await session.commit()
             return True
     except Exception as e:
-        logger.warning("DB save_github_user_token failed: %s", type(e).__name__)
+        logger.warning("DB add_github_token failed: %s", type(e).__name__)
         return False
 
 
-async def clear_github_user_token(uid: str) -> None:
+async def list_github_tokens(uid: str) -> list[dict[str, Any]]:
+    """登録済みトークンを古い順に返す。値は復号済み。
+
+    復号できないもの（ENCRYPTION_KEY を替えた等）は使えないので除外する。
+    """
     if not db_available():
-        return
+        return []
     try:
         async with get_session_factory()() as session:
             user = await session.get(User, uuid.UUID(uid))
             if user is None:
-                return
-            user.github_token_encrypted = None
-            user.github_login = None
+                return []
+            await _migrate_legacy_token(session, user)
+            await session.commit()
+
+            result = await session.execute(
+                select(GithubToken)
+                .where(GithubToken.user_id == uuid.UUID(uid))
+                .order_by(GithubToken.created_at)
+            )
+            tokens = []
+            for row in result.scalars().all():
+                value = decrypt(row.token_encrypted)
+                if value is None:
+                    continue
+                tokens.append(
+                    {
+                        "id": row.id,
+                        "label": row.label,
+                        "github_login": row.github_login,
+                        "created_at": row.created_at,
+                        "token": value,
+                    }
+                )
+            return tokens
+    except Exception as e:
+        logger.warning("DB list_github_tokens failed: %s", type(e).__name__)
+        return []
+
+
+async def delete_github_token(uid: str, token_id: int) -> None:
+    if not db_available():
+        return
+    try:
+        async with get_session_factory()() as session:
+            # 対応の記録も一緒に消す。消えたトークンを指し続けても意味がない。
+            await session.execute(
+                delete(RepositoryTokenBinding).where(
+                    RepositoryTokenBinding.user_id == uuid.UUID(uid),
+                    RepositoryTokenBinding.token_id == token_id,
+                )
+            )
+            await session.execute(
+                delete(GithubToken).where(
+                    GithubToken.user_id == uuid.UUID(uid),
+                    GithubToken.id == token_id,
+                )
+            )
             await session.commit()
     except Exception as e:
-        logger.warning("DB clear_github_user_token failed: %s", type(e).__name__)
+        logger.warning("DB delete_github_token failed: %s", type(e).__name__)
 
 
-async def load_github_user_token(uid: str) -> str | None:
-    user = await get_user_by_id(uuid.UUID(uid))
-    if user is None:
+# --- リポジトリとトークンの対応 ------------------------------------------------
+
+
+async def get_repo_binding(uid: str, owner: str, repo: str) -> int | None:
+    """このリポジトリで前回成功したトークンのIDを返す。"""
+    if not db_available():
         return None
-    return decrypt(user.github_token_encrypted)
+    try:
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                select(RepositoryTokenBinding.token_id).where(
+                    RepositoryTokenBinding.user_id == uuid.UUID(uid),
+                    RepositoryTokenBinding.owner == owner,
+                    RepositoryTokenBinding.repo == repo,
+                )
+            )
+            return result.scalar_one_or_none()
+    except Exception as e:
+        logger.warning("DB get_repo_binding failed: %s", type(e).__name__)
+        return None
+
+
+async def save_repo_binding(uid: str, owner: str, repo: str, token_id: int) -> None:
+    if not db_available():
+        return
+    try:
+        async with get_session_factory()() as session:
+            statement = (
+                pg_insert(RepositoryTokenBinding)
+                .values(
+                    user_id=uuid.UUID(uid),
+                    owner=owner,
+                    repo=repo,
+                    token_id=token_id,
+                )
+                .on_conflict_do_update(
+                    index_elements=["user_id", "owner", "repo"],
+                    set_={"token_id": token_id, "last_verified": _utcnow()},
+                )
+            )
+            await session.execute(statement)
+            await session.commit()
+    except Exception as e:
+        logger.warning("DB save_repo_binding failed: %s", type(e).__name__)
+
+
+async def delete_repo_binding(uid: str, owner: str, repo: str) -> None:
+    """記録した組み合わせが使えなくなったときに捨てる。次回また総当たりする。"""
+    if not db_available():
+        return
+    try:
+        async with get_session_factory()() as session:
+            await session.execute(
+                delete(RepositoryTokenBinding).where(
+                    RepositoryTokenBinding.user_id == uuid.UUID(uid),
+                    RepositoryTokenBinding.owner == owner,
+                    RepositoryTokenBinding.repo == repo,
+                )
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning("DB delete_repo_binding failed: %s", type(e).__name__)
 
 
 # --- learning progress ---------------------------------------------------
@@ -155,6 +300,99 @@ async def record_answer(uid: str, repository_id: str, correct: bool) -> None:
             await session.commit()
     except Exception as e:
         logger.warning("DB record_answer failed: %s", type(e).__name__)
+
+
+# --- 生成履歴 -----------------------------------------------------------------
+
+
+async def record_generation(
+    uid: str,
+    *,
+    repository_url: str,
+    branch: str,
+    repository_id: str,
+    section_count: int,
+    quiz_count: int,
+) -> None:
+    """生成したクイズを履歴に記録する。同じリポジトリなら行を増やさず更新する。
+
+    履歴の記録に失敗しても学習そのものは続けられるべきなので、例外は握りつぶす。
+    """
+    if not db_available():
+        return
+    try:
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                select(GenerationHistory).where(
+                    GenerationHistory.user_id == uuid.UUID(uid),
+                    GenerationHistory.repository_url == repository_url,
+                    GenerationHistory.branch == branch,
+                )
+            )
+            entry = result.scalar_one_or_none()
+            if entry is None:
+                entry = GenerationHistory(
+                    user_id=uuid.UUID(uid),
+                    repository_url=repository_url,
+                    branch=branch,
+                    repository_id=repository_id,
+                    section_count=section_count,
+                    quiz_count=quiz_count,
+                )
+                session.add(entry)
+            else:
+                entry.repository_id = repository_id
+                entry.section_count = section_count
+                entry.quiz_count = quiz_count
+                entry.last_opened = _utcnow()
+            await session.commit()
+    except Exception as e:
+        logger.warning("DB record_generation failed: %s", type(e).__name__)
+
+
+async def list_generations(uid: str, limit: int = 50) -> list[dict[str, Any]]:
+    """新しく開いたものから順に履歴を返す。"""
+    if not db_available():
+        return []
+    try:
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                select(GenerationHistory)
+                .where(GenerationHistory.user_id == uuid.UUID(uid))
+                .order_by(GenerationHistory.last_opened.desc())
+                .limit(limit)
+            )
+            return [
+                {
+                    "repository_url": e.repository_url,
+                    "branch": e.branch,
+                    "repository_id": e.repository_id,
+                    "section_count": e.section_count,
+                    "quiz_count": e.quiz_count,
+                    "last_opened": e.last_opened,
+                }
+                for e in result.scalars().all()
+            ]
+    except Exception as e:
+        logger.warning("DB list_generations failed: %s", type(e).__name__)
+        return []
+
+
+async def delete_generation(uid: str, *, repository_url: str, branch: str) -> None:
+    if not db_available():
+        return
+    try:
+        async with get_session_factory()() as session:
+            await session.execute(
+                delete(GenerationHistory).where(
+                    GenerationHistory.user_id == uuid.UUID(uid),
+                    GenerationHistory.repository_url == repository_url,
+                    GenerationHistory.branch == branch,
+                )
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning("DB delete_generation failed: %s", type(e).__name__)
 
 
 async def get_progress(uid: str) -> dict[str, Any]:

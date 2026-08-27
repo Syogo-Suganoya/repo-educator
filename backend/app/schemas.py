@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -65,6 +67,11 @@ class QuizGenerateRequest(BaseModel):
     # 指定があるとキャッシュを使わず、その都度その観点で生成し直す。
     focus: str | None = Field(default=None, max_length=300)
 
+    # トップページのサンプルカード起点かどうか。真なら学習履歴に残さない。
+    # 誰が押しても同じ「お試し」なので、自分が何を解析したかの記録には要らない。
+    # どの入口から来たかはクライアントしか知らないため、ここで受け取る。
+    from_sample: bool = False
+
 
 class DocQuestionRequest(BaseModel):
     """ドキュメントタブから投げる、リポジトリについての質問。"""
@@ -78,6 +85,25 @@ class DocAnswerResponse(BaseModel):
     answer: str
     # 回答の根拠にしたファイル。利用者が実物を確認しに行けるようにする。
     file_paths: list[str] = []
+
+
+class GenerationHistoryItem(BaseModel):
+    """一度生成したクイズを、あとから開き直すための最小限の情報。
+
+    クイズの中身は持たない。開き直すときは通常の生成APIを呼ぶ
+    （同じコミットならキャッシュに当たるため待ち時間はほぼない）。
+    """
+
+    repository_url: str
+    branch: str = "main"
+    repository_id: str = ""
+    section_count: int = 0
+    quiz_count: int = 0
+    last_opened: datetime | None = None
+
+
+class GenerationHistoryResponse(BaseModel):
+    history: list[GenerationHistoryItem] = []
 
 
 class QuizGenerateResponse(BaseModel):
@@ -122,8 +148,9 @@ class MeResponse(BaseModel):
     name: str | None = None
     picture: str | None = None
     github_login: str | None = None
-    # PATそのものは絶対に返さない。「設定済みかどうか」だけをフロントに伝える。
+    # PATそのものは絶対に返さない。「設定済みかどうか」と本数だけをフロントに伝える。
     has_github_token: bool = False
+    github_token_count: int = 0
 
 
 class SaveGithubTokenRequest(BaseModel):
@@ -133,10 +160,21 @@ class SaveGithubTokenRequest(BaseModel):
     # GET /user から取れたログイン名を添えられればUI表示に使う（任意）。
     github_login: str | None = None
 
+    # GitHub側で付けたトークン名。GitHubのAPIからは取得できないので本人に入力してもらう。
+    label: str | None = Field(default=None, max_length=60)
 
-class GithubTokenStatusResponse(BaseModel):
-    has_github_token: bool
+
+class GithubTokenSummary(BaseModel):
+    """登録済みトークンの表示用情報。トークンの値そのものは絶対に含めない。"""
+
+    id: int
+    label: str | None = None
     github_login: str | None = None
+    created_at: datetime | None = None
+
+
+class GithubTokenListResponse(BaseModel):
+    tokens: list[GithubTokenSummary] = []
 
 
 class RepositorySummary(BaseModel):

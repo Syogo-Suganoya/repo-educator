@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # --- フロントエンド ---
     # 既定は開発用の全許可。`flutter run -d chrome` はポートが毎回変わるため。
-    # 本番では必ずフロントエンドの配信ドメインを指定すること（DEPLOY.md 参照）。
+    # 本番では必ずフロントエンドの配信ドメインを指定すること。
     frontend_origin: str = "*"
 
     @property

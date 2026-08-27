@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'auth/auth_service.dart';
+import 'history/generation_history.dart';
 import 'models/quiz.dart';
 import 'models/repository.dart';
 
@@ -63,6 +64,9 @@ class ApiClient {
     /// 出題の観点を自由文で指定する（例:「認証まわりだけ出して」）。
     /// 指定するとキャッシュを使わず、その観点で生成し直される。
     String? focus,
+
+    /// トップページのサンプルカード起点かどうか。真ならサーバーは学習履歴に残さない。
+    bool fromSample = false,
   }) async {
     final response = await http.post(
       Uri.parse('$_apiBaseUrl/api/v1/quiz/generate'),
@@ -72,6 +76,7 @@ class ApiClient {
         'branch': branch,
         'num_questions': numQuestions,
         if (focus != null && focus.trim().isNotEmpty) 'focus': focus.trim(),
+        if (fromSample) 'from_sample': true,
       }),
     );
 
@@ -101,11 +106,40 @@ class ApiClient {
 
     if (response.statusCode != 200) _throwFrom(response);
 
-    final json = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    final json =
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     return DocAnswer(
       answer: json['answer'] as String? ?? '',
       filePaths: (json['file_paths'] as List?)?.cast<String>() ?? const [],
     );
+  }
+
+  /// ログイン中のユーザーが生成したクイズの履歴（新しい順）。
+  Future<List<GenerationHistoryEntry>> fetchHistory() async {
+    final response = await http.get(
+      Uri.parse('$_apiBaseUrl/api/v1/history'),
+      headers: await _headers(json: false),
+    );
+    if (response.statusCode != 200) _throwFrom(response);
+    final body =
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    return (body['history'] as List)
+        .map((e) => GenerationHistoryEntry.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> deleteHistory({
+    required String repositoryUrl,
+    required String branch,
+  }) async {
+    final uri = Uri.parse('$_apiBaseUrl/api/v1/history').replace(
+      queryParameters: {'repository_url': repositoryUrl, 'branch': branch},
+    );
+    final response = await http.delete(
+      uri,
+      headers: await _headers(json: false),
+    );
+    if (response.statusCode != 200) _throwFrom(response);
   }
 
   Future<AccountInfo> fetchMe() async {
@@ -114,35 +148,59 @@ class ApiClient {
       headers: await _headers(json: false),
     );
     if (response.statusCode != 200) _throwFrom(response);
-    final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    final body =
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     return AccountInfo(
       githubLogin: body['github_login'] as String?,
       hasGithubToken: body['has_github_token'] as bool? ?? false,
+      githubTokenCount: body['github_token_count'] as int? ?? 0,
     );
   }
 
-  /// 設定画面で入力されたPersonal Access Tokenを保存する。
-  /// サーバー側でトークンの有効性を確認したうえで暗号化保存するため、失敗しうる。
-  Future<AccountInfo> saveGithubToken(String token) async {
-    final response = await http.put(
-      Uri.parse('$_apiBaseUrl/api/v1/github/token'),
-      headers: await _headers(),
-      body: jsonEncode({'token': token}),
-    );
-    if (response.statusCode != 200) _throwFrom(response);
-    final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    return AccountInfo(
-      githubLogin: body['github_login'] as String?,
-      hasGithubToken: body['has_github_token'] as bool? ?? false,
-    );
-  }
-
-  Future<void> clearGithubToken() async {
-    final response = await http.delete(
-      Uri.parse('$_apiBaseUrl/api/v1/github/token'),
+  /// 登録済みトークンの一覧。値そのものは返らない。
+  Future<List<GithubTokenSummary>> fetchGithubTokens() async {
+    final response = await http.get(
+      Uri.parse('$_apiBaseUrl/api/v1/github/tokens'),
       headers: await _headers(json: false),
     );
     if (response.statusCode != 200) _throwFrom(response);
+    return _tokensFrom(response);
+  }
+
+  /// 設定画面で入力されたPersonal Access Tokenを追加する。
+  /// サーバー側でトークンの有効性を確認したうえで暗号化保存するため、失敗しうる。
+  /// [label] はGitHubで付けたトークン名。一覧の見分けに使うだけで、認証には関係ない。
+  Future<List<GithubTokenSummary>> addGithubToken(
+    String token, {
+    String? label,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$_apiBaseUrl/api/v1/github/tokens'),
+      headers: await _headers(),
+      body: jsonEncode({
+        'token': token,
+        if (label != null && label.trim().isNotEmpty) 'label': label.trim(),
+      }),
+    );
+    if (response.statusCode != 200) _throwFrom(response);
+    return _tokensFrom(response);
+  }
+
+  Future<List<GithubTokenSummary>> deleteGithubToken(int tokenId) async {
+    final response = await http.delete(
+      Uri.parse('$_apiBaseUrl/api/v1/github/tokens/$tokenId'),
+      headers: await _headers(json: false),
+    );
+    if (response.statusCode != 200) _throwFrom(response);
+    return _tokensFrom(response);
+  }
+
+  List<GithubTokenSummary> _tokensFrom(http.Response response) {
+    final body =
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    return (body['tokens'] as List)
+        .map((t) => GithubTokenSummary.fromJson(t as Map<String, dynamic>))
+        .toList();
   }
 
   Future<List<RepositorySummary>> fetchRepositories() async {
@@ -151,7 +209,8 @@ class ApiClient {
       headers: await _headers(json: false),
     );
     if (response.statusCode != 200) _throwFrom(response);
-    final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    final body =
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     return (body['repositories'] as List)
         .map((r) => RepositorySummary.fromJson(r as Map<String, dynamic>))
         .toList();
@@ -233,6 +292,13 @@ class QuizApiException implements Exception {
     }
     if (detail.contains('Invalid GitHub repository URL')) {
       return 'GitHubのリポジトリURLの形式が正しくありません。';
+    }
+    // 設定画面で入力したトークンをGitHubが受け付けなかった場合。
+    // 打ち間違いか期限切れのどちらかなので、両方を挙げて確認先を示す。
+    if (detail.contains('GitHub token is invalid')) {
+      return 'このトークンはGitHubに受け付けられませんでした。'
+          '値が正しく貼り付けられているか、有効期限が切れていないかを確認してください。'
+          'トークンは発行直後の画面でしか表示されないため、分からなくなった場合は新しく発行し直してください。';
     }
     return detail;
   }

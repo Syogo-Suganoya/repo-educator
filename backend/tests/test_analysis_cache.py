@@ -241,3 +241,209 @@ class TestErrorClassification:
 
     def test_success_passes_through(self):
         self._check(200)
+
+
+class TestRepositoryListing:
+    """一覧に出すのはPATで読めるプライベートリポジトリだけであること。
+
+    公開リポジトリはURLを貼れば解析できるので、ここに混ぜると
+    「PATがないと辿り着けないもの」という導線の意味が薄れる。
+    """
+
+    def _run(self, found):
+        import asyncio
+
+        from app import main as m
+        from app import store
+        from app.auth import AuthUser
+
+        original_list = m.list_my_repositories
+        original_tokens = store.list_github_tokens
+
+        async def fake_list(token):
+            return found
+
+        async def fake_tokens(uid):
+            return [{"id": 1, "github_login": "me", "created_at": None, "token": "t"}]
+
+        m.list_my_repositories = fake_list
+        store.list_github_tokens = fake_tokens
+        try:
+            response = asyncio.run(
+                m.list_repositories(AuthUser(uid="u", email="e@example.com", name=None))
+            )
+            return [r.full_name for r in response.repositories]
+        finally:
+            m.list_my_repositories = original_list
+            store.list_github_tokens = original_tokens
+
+    def _repo(self, name, private):
+        return {
+            "full_name": name,
+            "html_url": f"https://github.com/{name}",
+            "private": private,
+            "default_branch": "main",
+        }
+
+    def test_public_repositories_are_excluded(self):
+        names = self._run([self._repo("me/pub", False), self._repo("me/priv", True)])
+        assert names == ["me/priv"]
+
+    def test_empty_when_no_private_repositories(self):
+        assert self._run([self._repo("me/pub", False)]) == []
+
+
+class TestTokenResolution:
+    """どのトークンでどのリポジトリを読むかの解決。
+
+    総当たりで見つけ、成功した組み合わせを記録し、後日失敗したら記録を捨てて探し直す。
+    """
+
+    def _run(self, *, tokens, readable_by, bound_id=None):
+        """readable_by … そのリポジトリを読めるトークンの値の集合"""
+        import asyncio
+
+        from app import main as m
+        from app import store
+        from app.auth import AuthUser
+        from app.github_client import RepositoryAccessDeniedError, RepositoryMeta
+
+        saved: list[int] = []
+        deleted: list[bool] = []
+
+        async def fake_tokens(uid):
+            return tokens
+
+        async def fake_get_binding(uid, owner, repo):
+            return bound_id
+
+        async def fake_save_binding(uid, owner, repo, token_id):
+            saved.append(token_id)
+
+        async def fake_delete_binding(uid, owner, repo):
+            deleted.append(True)
+
+        attempts: list[str] = []
+
+        async def fake_meta(owner, repo, branch, token=None):
+            attempts.append(token)
+            if token not in readable_by:
+                raise RepositoryAccessDeniedError("no access")
+            return RepositoryMeta(private=True, pushed_at="2026-01-01T00:00:00Z")
+
+        originals = (
+            store.list_github_tokens,
+            store.get_repo_binding,
+            store.save_repo_binding,
+            store.delete_repo_binding,
+            m.fetch_repository_meta,
+        )
+        store.list_github_tokens = fake_tokens
+        store.get_repo_binding = fake_get_binding
+        store.save_repo_binding = fake_save_binding
+        store.delete_repo_binding = fake_delete_binding
+        m.fetch_repository_meta = fake_meta
+        try:
+            token, meta = asyncio.run(
+                m._resolve_user_token(
+                    AuthUser(uid="u", email="e@example.com", name=None), "o", "r", "main"
+                )
+            )
+            return {"token": token, "meta": meta, "saved": saved, "deleted": deleted, "attempts": attempts}
+        finally:
+            (
+                store.list_github_tokens,
+                store.get_repo_binding,
+                store.save_repo_binding,
+                store.delete_repo_binding,
+                m.fetch_repository_meta,
+            ) = originals
+
+    def _token(self, id, value):
+        return {"id": id, "github_login": f"user{id}", "created_at": None, "token": value}
+
+    def test_finds_the_working_token_and_remembers_it(self):
+        result = self._run(
+            tokens=[self._token(1, "a"), self._token(2, "b")],
+            readable_by={"b"},
+        )
+        assert result["token"] == "b"
+        assert result["saved"] == [2]
+
+    def test_bound_token_is_tried_first(self):
+        result = self._run(
+            tokens=[self._token(1, "a"), self._token(2, "b")],
+            readable_by={"a", "b"},
+            bound_id=2,
+        )
+        # 記録済みのものだけで済み、他は試さない
+        assert result["attempts"] == ["b"]
+        assert result["token"] == "b"
+        # 変化がないので保存し直さない
+        assert result["saved"] == []
+
+    def test_stale_binding_falls_back_to_search(self):
+        # 記録済みのトークンでは読めなくなったが、別のトークンでは読める
+        result = self._run(
+            tokens=[self._token(1, "a"), self._token(2, "b")],
+            readable_by={"a"},
+            bound_id=2,
+        )
+        assert result["token"] == "a"
+        assert result["saved"] == [1]
+
+    def test_forgets_binding_when_nothing_works(self):
+        result = self._run(
+            tokens=[self._token(1, "a")],
+            readable_by=set(),
+            bound_id=1,
+        )
+        assert result["token"] is None
+        # 次回また総当たりできるよう、古い記録は捨てる
+        assert result["deleted"] == [True]
+
+    def test_no_tokens_means_no_access(self):
+        result = self._run(tokens=[], readable_by={"a"})
+        assert result["token"] is None
+        assert result["attempts"] == []
+
+
+class TestSampleHistory:
+    """サンプルカード起点の生成は学習履歴に残さない。
+
+    トップのサンプルは誰が押しても同じキュレーション済みデータで、
+    「自分が何を解析したか」の記録としては雑音にしかならない。
+    一方、同じリポジトリでもURL入力欄から自分で入力したなら記録する。
+    どの入口から来たかはクライアントしか知らないので、リクエストで受け取る。
+    """
+
+    def _run(self, *, from_sample):
+        from app import main as main_module
+        from app.schemas import QuizGenerateRequest
+
+        remembered = []
+
+        async def fake_remember(user, *, request, repository_id, sections):
+            remembered.append(repository_id)
+
+        original = main_module._remember_generation
+        main_module._remember_generation = fake_remember
+        try:
+            request = QuizGenerateRequest(
+                repository_url="https://github.com/psf/requests",
+                branch="main",
+                from_sample=from_sample,
+            )
+            response = asyncio.run(main_module.generate_quiz(request, user=None))
+        finally:
+            main_module._remember_generation = original
+
+        # どちらの経路でもクイズ自体はサンプルのものが返る
+        assert response.sections
+        return remembered
+
+    def test_sample_card_is_not_recorded(self):
+        assert self._run(from_sample=True) == []
+
+    def test_typed_url_is_recorded(self):
+        assert self._run(from_sample=False) == ["psf_requests_main"]

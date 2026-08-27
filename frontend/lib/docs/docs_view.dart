@@ -240,12 +240,22 @@ class _QuestionComposer extends StatelessWidget {
               onSubmitted: (_) => onSubmit(),
               decoration: InputDecoration(
                 hintText: 'このリポジトリについて質問する（例: リトライはどこで制御している？）',
-                hintStyle: appMono(12.5, color: AppPalette.inkMuted.withValues(alpha: 0.6)),
-                prefixIcon: const Icon(Icons.chat_bubble_outline, size: 16, color: AppPalette.inkMuted),
+                hintStyle: appMono(
+                  12.5,
+                  color: AppPalette.inkMuted.withValues(alpha: 0.6),
+                ),
+                prefixIcon: const Icon(
+                  Icons.chat_bubble_outline,
+                  size: 16,
+                  color: AppPalette.inkMuted,
+                ),
                 isDense: true,
                 filled: true,
                 fillColor: AppPalette.surface,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
                 border: const OutlineInputBorder(
                   borderRadius: BorderRadius.zero,
                   borderSide: BorderSide(color: AppPalette.line),
@@ -267,16 +277,28 @@ class _QuestionComposer extends StatelessWidget {
             style: FilledButton.styleFrom(
               backgroundColor: AppPalette.accent,
               foregroundColor: Colors.white,
-              shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.zero,
+              ),
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
             ),
             child: busy
                 ? const SizedBox(
                     width: 16,
                     height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
                   )
-                : Text('聞く', style: appMono(12.5, color: Colors.white, weight: FontWeight.w700)),
+                : Text(
+                    '聞く',
+                    style: appMono(
+                      12.5,
+                      color: Colors.white,
+                      weight: FontWeight.w700,
+                    ),
+                  ),
           ),
         ],
       ),
@@ -337,10 +359,16 @@ class _QaTurnView extends StatelessWidget {
               const SizedBox(
                 width: 14,
                 height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2, color: AppPalette.inkMuted),
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppPalette.inkMuted,
+                ),
               ),
               const SizedBox(width: 10),
-              Text('コードを読んでいます…', style: appMono(12, color: AppPalette.inkMuted)),
+              Text(
+                'コードを読んでいます…',
+                style: appMono(12, color: AppPalette.inkMuted),
+              ),
             ],
           )
         else if (turn.error != null)
@@ -348,7 +376,10 @@ class _QaTurnView extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.all(10),
             color: AppPalette.removeSoft,
-            child: Text(turn.error!, style: appMono(12, color: AppPalette.remove)),
+            child: Text(
+              turn.error!,
+              style: appMono(12, color: AppPalette.remove),
+            ),
           )
         else ...[
           AppText(
@@ -360,7 +391,12 @@ class _QaTurnView extends StatelessWidget {
             const SizedBox(height: 12),
             Text(
               '根拠にしたファイル',
-              style: appMono(11, color: AppPalette.inkMuted, weight: FontWeight.w700, letterSpacing: 0.5),
+              style: appMono(
+                11,
+                color: AppPalette.inkMuted,
+                weight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
             ),
             const SizedBox(height: 6),
             Wrap(
@@ -369,9 +405,15 @@ class _QaTurnView extends StatelessWidget {
               children: [
                 for (final path in turn.filePaths)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
                     color: AppPalette.surfaceSunken,
-                    child: Text(path, style: appMono(11.5, color: AppPalette.inkMuted)),
+                    child: Text(
+                      path,
+                      style: appMono(11.5, color: AppPalette.inkMuted),
+                    ),
                   ),
               ],
             ),
@@ -402,54 +444,10 @@ class DocSearchField extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        TextField(
+        AppSearchField(
           controller: controller,
+          hintText: '機能名・関数名・やりたいことで検索（例: 認証 / Context.Next / 追加するには）',
           onChanged: onChanged,
-          style: appMono(14, color: AppPalette.ink),
-          decoration: InputDecoration(
-            hintText: '機能名・関数名・やりたいことで検索（例: 認証 / Context.Next / 追加するには）',
-            hintStyle: appMono(
-              13,
-              color: AppPalette.inkMuted.withValues(alpha: 0.5),
-            ),
-            prefixIcon: const Icon(
-              Icons.search,
-              size: 18,
-              color: AppPalette.inkMuted,
-            ),
-            suffixIcon: controller.text.isEmpty
-                ? null
-                : IconButton(
-                    icon: const Icon(
-                      Icons.close,
-                      size: 16,
-                      color: AppPalette.inkMuted,
-                    ),
-                    onPressed: () {
-                      controller.clear();
-                      onChanged('');
-                    },
-                  ),
-            isDense: true,
-            filled: true,
-            fillColor: AppPalette.surface,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 14,
-            ),
-            border: const OutlineInputBorder(
-              borderRadius: BorderRadius.zero,
-              borderSide: BorderSide(color: AppPalette.line),
-            ),
-            enabledBorder: const OutlineInputBorder(
-              borderRadius: BorderRadius.zero,
-              borderSide: BorderSide(color: AppPalette.line),
-            ),
-            focusedBorder: const OutlineInputBorder(
-              borderRadius: BorderRadius.zero,
-              borderSide: BorderSide(color: AppPalette.accent, width: 1.5),
-            ),
-          ),
         ),
         const SizedBox(height: 8),
         Text(
@@ -711,7 +709,10 @@ class DocDetail extends StatelessWidget {
                 child: TextButton.icon(
                   onPressed: onBackToConversation,
                   icon: const Icon(Icons.arrow_back, size: 14),
-                  label: Text('質問の回答に戻る', style: appMono(11.5, weight: FontWeight.w700)),
+                  label: Text(
+                    '質問の回答に戻る',
+                    style: appMono(11.5, weight: FontWeight.w700),
+                  ),
                   style: TextButton.styleFrom(
                     foregroundColor: AppPalette.inkMuted,
                     padding: EdgeInsets.zero,
@@ -757,7 +758,11 @@ class DocDetail extends StatelessWidget {
             ],
             const SizedBox(height: 24),
             for (final paragraph in entry.paragraphs) ...[
-              AppText(paragraph, selectable: true, style: appBody(14.5, height: 2.0)),
+              AppText(
+                paragraph,
+                selectable: true,
+                style: appBody(14.5, height: 2.0),
+              ),
               const SizedBox(height: 18),
             ],
             if (entry.codeRefs.isNotEmpty) ...[

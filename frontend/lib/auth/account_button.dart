@@ -15,15 +15,15 @@ class AccountButton extends StatefulWidget {
     required this.authService,
     required this.apiClient,
     this.onChanged,
-    this.onShowPatGuide,
+    this.onOpenProfile,
   });
 
   final AuthService authService;
   final ApiClient apiClient;
   final VoidCallback? onChanged;
 
-  /// トークン入力ダイアログから、トップページのPAT取得手順へ案内する。
-  final VoidCallback? onShowPatGuide;
+  /// アカウントに紐づくもの（トークン・リポジトリ・履歴）をまとめた画面を開く。
+  final VoidCallback? onOpenProfile;
 
   @override
   State<AccountButton> createState() => _AccountButtonState();
@@ -49,7 +49,10 @@ class _AccountButtonState extends State<AccountButton> {
 
   Future<void> _signIn() async {
     // ダイアログ内で register/login を行う。ここでは結果を受け取るだけ。
-    final signedIn = await LoginDialog.show(context, authService: widget.authService);
+    final signedIn = await LoginDialog.show(
+      context,
+      authService: widget.authService,
+    );
     if (signedIn == true) {
       widget.onChanged?.call();
       await _refreshAccount();
@@ -63,13 +66,13 @@ class _AccountButtonState extends State<AccountButton> {
   }
 
   Future<void> _openTokenDialog() async {
-    final updated = await GithubTokenDialog.show(
+    final tokens = await GithubTokenDialog.show(
       context,
       apiClient: widget.apiClient,
-      account: _account,
-      onShowPatGuide: widget.onShowPatGuide,
     );
-    if (updated != null && mounted) setState(() => _account = updated);
+    if (tokens == null || !mounted) return;
+    // 表示用のアカウント情報を取り直す（本数や連携先が変わっている）。
+    await _refreshAccount();
   }
 
   @override
@@ -84,10 +87,18 @@ class _AccountButtonState extends State<AccountButton> {
         if (!widget.authService.isSignedIn) {
           return TextButton.icon(
             onPressed: _signIn,
-            icon: const Icon(Icons.lock_open, size: 15, color: AppPalette.accent),
+            icon: const Icon(
+              Icons.lock_open,
+              size: 15,
+              color: AppPalette.accent,
+            ),
             label: Text(
               'ログイン',
-              style: appMono(12.5, color: AppPalette.accent, weight: FontWeight.w700),
+              style: appMono(
+                12.5,
+                color: AppPalette.accent,
+                weight: FontWeight.w700,
+              ),
             ),
           );
         }
@@ -97,17 +108,37 @@ class _AccountButtonState extends State<AccountButton> {
           tooltip: 'アカウント',
           onSelected: (value) {
             if (value == 'signout') _signOut();
+            if (value == 'profile') widget.onOpenProfile?.call();
             if (value == 'github_token') _openTokenDialog();
           },
           itemBuilder: (context) => [
+            if (widget.onOpenProfile != null)
+              PopupMenuItem(
+                value: 'profile',
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.person_outline,
+                      size: 16,
+                      color: AppPalette.inkMuted,
+                    ),
+                    const SizedBox(width: 8),
+                    Text('プロフィール', style: appBody(13.5)),
+                  ],
+                ),
+              ),
             PopupMenuItem(
               value: 'github_token',
               child: Row(
                 children: [
                   Icon(
-                    _account.hasGithubToken ? Icons.check_circle_outline : Icons.key_outlined,
+                    _account.hasGithubToken
+                        ? Icons.check_circle_outline
+                        : Icons.key_outlined,
                     size: 16,
-                    color: _account.hasGithubToken ? AppPalette.add : AppPalette.inkMuted,
+                    color: _account.hasGithubToken
+                        ? AppPalette.add
+                        : AppPalette.inkMuted,
                   ),
                   const SizedBox(width: 8),
                   Text('GitHubトークン', style: appBody(13.5)),
@@ -122,10 +153,25 @@ class _AccountButtonState extends State<AccountButton> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.person_outline, size: 16, color: AppPalette.inkMuted),
+              const Icon(
+                Icons.person_outline,
+                size: 16,
+                color: AppPalette.inkMuted,
+              ),
               const SizedBox(width: 6),
-              Text(name, style: appMono(12.5, color: AppPalette.inkMuted, weight: FontWeight.w600)),
-              const Icon(Icons.arrow_drop_down, size: 18, color: AppPalette.inkMuted),
+              Text(
+                name,
+                style: appMono(
+                  12.5,
+                  color: AppPalette.inkMuted,
+                  weight: FontWeight.w600,
+                ),
+              ),
+              const Icon(
+                Icons.arrow_drop_down,
+                size: 18,
+                color: AppPalette.inkMuted,
+              ),
             ],
           ),
         );

@@ -4,9 +4,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'code_highlight.dart';
 
-/// デザインの核: 「コードレビュー」のメタファー。
-/// クイズの1問=1件の差分（diff）、正解=approve、不正解=changes requested。
-/// このアプリのユーザー（開発者）が日常で読んでいる語彙をそのままUIに転用する。
+/// デザインの核: 「実際のコードを読ませる」こと。
+/// コードブロックを主役に据え、正誤は緑と赤で即座に分かるようにする。
 class AppPalette {
   // ベースは温かみのある紙色。長文の問題文・解説を読み続けても疲れない明るい基調。
   static const bg = Color(0xFFF7F5F0);
@@ -16,7 +15,7 @@ class AppPalette {
   static const ink = Color(0xFF1C1B18);
   static const inkMuted = Color(0xFF726C5E);
 
-  // コードブロックだけは黒に沈める。「差分の中身」という主役を視覚的に切り出す。
+  // コードブロックだけは黒に沈める。読ませたい本体を視覚的に切り出す。
   static const codeBg = Color(0xFF14171C);
   static const codeLine = Color(0xFF262B33);
   static const codeText = Color(0xFFE3E1D9);
@@ -26,13 +25,13 @@ class AppPalette {
   static const accent = Color(0xFF4B3FDB);
   static const accentSoft = Color(0xFFEAE7FB);
 
-  // レビュー結果を表す2色。approve=緑 / changes requested=赤。
+  // 正誤を表す2色。正解=緑 / 不正解=赤。
   static const add = Color(0xFF1E7D53);
   static const addSoft = Color(0xFFE4F3EA);
   static const remove = Color(0xFFC1432B);
   static const removeSoft = Color(0xFFFBEAE6);
 
-  // 空欄（未回答の差分行）のマーカー色。
+  // 空欄（未回答の行）のマーカー色。
   static const pending = Color(0xFFB8791E);
   static const pendingSoft = Color(0xFFFBF0DE);
 
@@ -41,7 +40,13 @@ class AppPalette {
 }
 
 /// 見出し・ボタン・UIラベル用。幾何学的でテクニカルな印象のゴシック。
-TextStyle appDisplay(double size, {Color? color, FontWeight? weight, double? height, double? letterSpacing}) {
+TextStyle appDisplay(
+  double size, {
+  Color? color,
+  FontWeight? weight,
+  double? height,
+  double? letterSpacing,
+}) {
   return GoogleFonts.zenKakuGothicNew(
     fontSize: size,
     color: color ?? AppPalette.ink,
@@ -51,8 +56,13 @@ TextStyle appDisplay(double size, {Color? color, FontWeight? weight, double? hei
   );
 }
 
-/// 設問文・解説・レビューコメントなど長文用。明朝体で読み物としての落ち着きを出す。
-TextStyle appBody(double size, {Color? color, FontWeight? weight, double? height}) {
+/// 設問文・解説など長文用。明朝体で読み物としての落ち着きを出す。
+TextStyle appBody(
+  double size, {
+  Color? color,
+  FontWeight? weight,
+  double? height,
+}) {
   return GoogleFonts.shipporiMincho(
     fontSize: size,
     color: color ?? AppPalette.ink,
@@ -62,7 +72,13 @@ TextStyle appBody(double size, {Color? color, FontWeight? weight, double? height
 }
 
 /// コード・ファイルパス・diffメタ情報用の等幅フォント。
-TextStyle appMono(double size, {Color? color, FontWeight? weight, double? letterSpacing, double? height}) {
+TextStyle appMono(
+  double size, {
+  Color? color,
+  FontWeight? weight,
+  double? letterSpacing,
+  double? height,
+}) {
   return GoogleFonts.jetBrainsMono(
     fontSize: size,
     color: color ?? AppPalette.ink,
@@ -93,12 +109,19 @@ class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
                 onTap: onBack,
                 child: const Padding(
                   padding: EdgeInsets.only(right: 8),
-                  child: Icon(Icons.arrow_back, size: 20, color: AppPalette.inkMuted),
+                  child: Icon(
+                    Icons.arrow_back,
+                    size: 20,
+                    color: AppPalette.inkMuted,
+                  ),
                 ),
               ),
             Icon(Icons.difference_outlined, size: 18, color: AppPalette.accent),
             const SizedBox(width: 8),
-            Text('repo-educator', style: appDisplay(15, weight: FontWeight.w700)),
+            Text(
+              'repo-educator',
+              style: appDisplay(15, weight: FontWeight.w700),
+            ),
             const SizedBox(width: 16),
             Expanded(
               child: trailing == null
@@ -138,7 +161,11 @@ class DiffCard extends StatelessWidget {
         color: AppPalette.surface,
         border: Border.all(color: AppPalette.line),
         boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 24, offset: const Offset(0, 12)),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 24,
+            offset: const Offset(0, 12),
+          ),
         ],
       ),
       child: Column(
@@ -152,12 +179,20 @@ class DiffCard extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Icon(Icons.insert_drive_file_outlined, size: 14, color: AppPalette.inkMuted),
+                Icon(
+                  Icons.insert_drive_file_outlined,
+                  size: 14,
+                  color: AppPalette.inkMuted,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     filePath,
-                    style: appMono(12.5, color: AppPalette.inkMuted, weight: FontWeight.w600),
+                    style: appMono(
+                      12.5,
+                      color: AppPalette.inkMuted,
+                      weight: FontWeight.w600,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -165,10 +200,7 @@ class DiffCard extends StatelessWidget {
               ],
             ),
           ),
-          Padding(
-            padding: padding ?? const EdgeInsets.all(20),
-            child: child,
-          ),
+          Padding(padding: padding ?? const EdgeInsets.all(20), child: child),
         ],
       ),
     );
@@ -180,6 +212,7 @@ class DiffCodeBlock extends StatelessWidget {
   const DiffCodeBlock({super.key, required this.code, this.revealColor});
 
   final String code;
+
   /// 回答後に空欄行へ適用する色（正解=green/不正解=red）。未回答時はnull（pending色）。
   final Color? revealColor;
 
@@ -188,13 +221,21 @@ class DiffCodeBlock extends StatelessWidget {
     final lines = code.split('\n');
     return Container(
       width: double.infinity,
-      decoration: BoxDecoration(color: AppPalette.codeBg, border: Border.all(color: Colors.black.withValues(alpha: 0.4))),
+      decoration: BoxDecoration(
+        color: AppPalette.codeBg,
+        border: Border.all(color: Colors.black.withValues(alpha: 0.4)),
+      ),
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (final line in lines) _CodeLine(text: line, isBlank: line.contains('___'), revealColor: revealColor),
+          for (final line in lines)
+            _CodeLine(
+              text: line,
+              isBlank: line.contains('___'),
+              revealColor: revealColor,
+            ),
         ],
       ),
     );
@@ -202,7 +243,11 @@ class DiffCodeBlock extends StatelessWidget {
 }
 
 class _CodeLine extends StatelessWidget {
-  const _CodeLine({required this.text, required this.isBlank, required this.revealColor});
+  const _CodeLine({
+    required this.text,
+    required this.isBlank,
+    required this.revealColor,
+  });
 
   final String text;
   final bool isBlank;
@@ -211,7 +256,9 @@ class _CodeLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // 構文に応じた色分けは全行に適用する。空欄行の強調は、背景と左のマーカーで行う。
-    final code = Text.rich(highlightLine(text, baseStyle: appMono(13, color: AppPalette.codeText)));
+    final code = Text.rich(
+      highlightLine(text, baseStyle: appMono(13, color: AppPalette.codeText)),
+    );
 
     if (!isBlank) {
       return Padding(
@@ -226,7 +273,12 @@ class _CodeLine extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(width: 3, height: 18, color: markColor, margin: const EdgeInsets.only(top: 1, right: 10)),
+          Container(
+            width: 3,
+            height: 18,
+            color: markColor,
+            margin: const EdgeInsets.only(top: 1, right: 10),
+          ),
           Expanded(child: code),
         ],
       ),
@@ -265,7 +317,11 @@ List<InlineSpan> appInlineSpans(
       spans.add(
         TextSpan(
           text: code,
-          style: appMono(baseFontSize * 0.88, color: AppPalette.inlineCode, weight: FontWeight.w700),
+          style: appMono(
+            baseFontSize * 0.88,
+            color: AppPalette.inlineCode,
+            weight: FontWeight.w700,
+          ),
         ),
       );
     } else {
@@ -279,7 +335,10 @@ List<InlineSpan> appInlineSpans(
               color: color.withValues(alpha: 0.16),
               border: Border(bottom: BorderSide(color: color, width: 2)),
             ),
-            child: Text('？', style: appMono(13, color: color, weight: FontWeight.w700)),
+            child: Text(
+              '？',
+              style: appMono(13, color: color, weight: FontWeight.w700),
+            ),
           ),
         ),
       );
@@ -290,10 +349,82 @@ List<InlineSpan> appInlineSpans(
   return spans;
 }
 
+/// 一覧を絞り込むための検索欄。ドキュメントと履歴で同じ見た目・同じ操作にする。
+class AppSearchField extends StatelessWidget {
+  const AppSearchField({
+    super.key,
+    required this.controller,
+    required this.hintText,
+    required this.onChanged,
+  });
+
+  final TextEditingController controller;
+  final String hintText;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      onChanged: onChanged,
+      style: appMono(14, color: AppPalette.ink),
+      decoration: InputDecoration(
+        hintText: hintText,
+        hintStyle: appMono(
+          13,
+          color: AppPalette.inkMuted.withValues(alpha: 0.5),
+        ),
+        prefixIcon: const Icon(
+          Icons.search,
+          size: 18,
+          color: AppPalette.inkMuted,
+        ),
+        suffixIcon: controller.text.isEmpty
+            ? null
+            : IconButton(
+                icon: const Icon(
+                  Icons.close,
+                  size: 16,
+                  color: AppPalette.inkMuted,
+                ),
+                onPressed: () {
+                  controller.clear();
+                  onChanged('');
+                },
+              ),
+        isDense: true,
+        filled: true,
+        fillColor: AppPalette.surface,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 14,
+        ),
+        border: const OutlineInputBorder(
+          borderRadius: BorderRadius.zero,
+          borderSide: BorderSide(color: AppPalette.line),
+        ),
+        enabledBorder: const OutlineInputBorder(
+          borderRadius: BorderRadius.zero,
+          borderSide: BorderSide(color: AppPalette.line),
+        ),
+        focusedBorder: const OutlineInputBorder(
+          borderRadius: BorderRadius.zero,
+          borderSide: BorderSide(color: AppPalette.accent, width: 1.5),
+        ),
+      ),
+    );
+  }
+}
+
 /// 外部サイトを新しいタブで開くリンク。
 /// 外部へ出ることが分かるようにアイコンを添える。
 class AppLink extends StatelessWidget {
-  const AppLink({super.key, required this.label, required this.url, this.style});
+  const AppLink({
+    super.key,
+    required this.label,
+    required this.url,
+    this.style,
+  });
 
   final String label;
   final String url;
@@ -308,7 +439,8 @@ class AppLink extends StatelessWidget {
     );
 
     return InkWell(
-      onTap: () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+      onTap: () =>
+          launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

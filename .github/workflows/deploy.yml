@@ -1,0 +1,153 @@
+name: Deploy
+
+# main への push で本番へ反映する。手動実行（workflow_dispatch）も残しておく。
+#
+# 認証はサービスアカウントキー（JSON）ではなく Workload Identity Federation を使う。
+# 鍵ファイルをリポジトリのシークレットに置かずに済み、失効管理も不要になるため。
+#
+# 必要なシークレット / 変数:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER … WIFプロバイダのリソース名
+#   secrets.GCP_SERVICE_ACCOUNT            … デプロイ実行用のサービスアカウント
+#   secrets.GCP_RUNTIME_SERVICE_ACCOUNT    … Cloud Runの実行時サービスアカウント
+#   vars.GCP_PROJECT_ID / vars.FRONTEND_ORIGIN
+#
+# Secret Manager 側には gemini-api-key / github-token / database-url /
+# jwt-secret / encryption-key を用意しておく。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# デプロイ中に次のpushが来ても、同時に走らせない（後勝ちで1本にまとめる）。
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGION: asia-northeast1
+  SERVICE: repo-educator-api
+
+jobs:
+  # 壊れたものを本番に出さないための門番。ここが落ちればデプロイは走らない。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backend dependencies
+        working-directory: backend
+        # requirements-dev.txt が requirements.txt を取り込む。
+        run: pip install -r requirements-dev.txt
+
+      - name: Run backend tests
+        working-directory: backend
+        run: python -m pytest -q
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: flutter pub get
+
+      - name: Analyze frontend
+        working-directory: frontend
+        run: flutter analyze lib test
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: flutter test
+
+  backend:
+    needs: test
+    runs-on: ubuntu-latest
+    # Workload Identity Federation でGCPの権限を借りるために必要。
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        working-directory: backend
+        run: |
+          set -euo pipefail
+
+          gcloud run deploy "$SERVICE" \
+            --source . \
+            --region "$REGION" \
+            --service-account "${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}" \
+            --set-env-vars "FRONTEND_ORIGIN=${{ vars.FRONTEND_ORIGIN }}" \
+            --set-secrets "GEMINI_API_KEY=gemini-api-key:latest" \
+            --set-secrets "GITHUB_TOKEN=github-token:latest" \
+            --set-secrets "DATABASE_URL=database-url:latest" \
+            --set-secrets "JWT_SECRET=jwt-secret:latest" \
+            --set-secrets "ENCRYPTION_KEY=encryption-key:latest" \
+            --allow-unauthenticated \
+            --quiet
+
+          url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.url)')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $url"
+
+      - name: Verify health
+        run: |
+          set -euo pipefail
+          # 起動に失敗したリビジョンを「成功」として通さない。
+          curl --fail --retry 5 --retry-delay 5 --retry-all-errors \
+            "${{ steps.deploy.outputs.url }}/healthz"
+
+  frontend:
+    # APIのURLをビルドに焼き込むため、バックエンドの後に実行する。
+    needs: backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build web
+        working-directory: frontend
+        run: |
+          flutter pub get
+          flutter build web --release \
+            --dart-define=API_BASE_URL=${{ needs.backend.outputs.url }}
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Deploy to Firebase Hosting
+        working-directory: frontend
+        run: |
+          npm install --global firebase-tools
+          # google-github-actions/auth が書き出した認証情報をそのまま使う
+          # （FIREBASE_TOKEN のような長命のトークンを持たなくて済む）。
+          firebase deploy --only hosting \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --non-interactive

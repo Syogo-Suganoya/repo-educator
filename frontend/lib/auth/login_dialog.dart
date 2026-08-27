@@ -12,7 +12,10 @@ class LoginDialog extends StatefulWidget {
 
   final AuthService authService;
 
-  static Future<bool?> show(BuildContext context, {required AuthService authService}) {
+  static Future<bool?> show(
+    BuildContext context, {
+    required AuthService authService,
+  }) {
     return showDialog<bool>(
       context: context,
       builder: (_) => LoginDialog(authService: authService),
@@ -100,16 +103,27 @@ class _LoginDialogState extends State<LoginDialog> {
                 _Field(label: '表示名（任意）', controller: _nameController),
                 const SizedBox(height: 12),
               ],
-              _Field(label: 'メールアドレス', controller: _emailController, hint: 'you@example.com'),
+              _Field(
+                label: 'メールアドレス',
+                controller: _emailController,
+                hint: 'you@example.com',
+              ),
               const SizedBox(height: 12),
-              _Field(label: 'パスワード', controller: _passwordController, obscure: true),
+              _Field(
+                label: 'パスワード',
+                controller: _passwordController,
+                obscure: true,
+              ),
               if (_errorMessage != null) ...[
                 const SizedBox(height: 12),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(10),
                   color: AppPalette.removeSoft,
-                  child: Text(_errorMessage!, style: appMono(12, color: AppPalette.remove)),
+                  child: Text(
+                    _errorMessage!,
+                    style: appMono(12, color: AppPalette.remove),
+                  ),
                 ),
               ],
               const SizedBox(height: 20),
@@ -120,18 +134,27 @@ class _LoginDialogState extends State<LoginDialog> {
                   style: FilledButton.styleFrom(
                     backgroundColor: AppPalette.accent,
                     foregroundColor: Colors.white,
-                    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.zero,
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
                   child: _busy
                       ? const SizedBox(
                           width: 18,
                           height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
                         )
                       : Text(
                           _isRegister ? '登録する' : 'ログイン',
-                          style: appDisplay(14, color: Colors.white, weight: FontWeight.w700),
+                          style: appDisplay(
+                            14,
+                            color: Colors.white,
+                            weight: FontWeight.w700,
+                          ),
                         ),
                 ),
               ),
@@ -141,9 +164,9 @@ class _LoginDialogState extends State<LoginDialog> {
                   onPressed: _busy
                       ? null
                       : () => setState(() {
-                            _isRegister = !_isRegister;
-                            _errorMessage = null;
-                          }),
+                          _isRegister = !_isRegister;
+                          _errorMessage = null;
+                        }),
                   child: Text(
                     _isRegister ? 'すでにアカウントをお持ちの方はこちら' : 'アカウントをお持ちでない方はこちら',
                     style: appMono(12, color: AppPalette.inkMuted),
@@ -159,7 +182,12 @@ class _LoginDialogState extends State<LoginDialog> {
 }
 
 class _Field extends StatelessWidget {
-  const _Field({required this.label, required this.controller, this.hint, this.obscure = false});
+  const _Field({
+    required this.label,
+    required this.controller,
+    this.hint,
+    this.obscure = false,
+  });
 
   final String label;
   final TextEditingController controller;
@@ -171,7 +199,14 @@ class _Field extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: appMono(11.5, color: AppPalette.inkMuted, weight: FontWeight.w600)),
+        Text(
+          label,
+          style: appMono(
+            11.5,
+            color: AppPalette.inkMuted,
+            weight: FontWeight.w600,
+          ),
+        ),
         const SizedBox(height: 6),
         TextField(
           controller: controller,
@@ -179,12 +214,27 @@ class _Field extends StatelessWidget {
           style: appMono(14, color: AppPalette.ink),
           decoration: InputDecoration(
             hintText: hint,
-            hintStyle: appMono(14, color: AppPalette.inkMuted.withValues(alpha: 0.5)),
+            hintStyle: appMono(
+              14,
+              color: AppPalette.inkMuted.withValues(alpha: 0.5),
+            ),
             isDense: true,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-            border: const OutlineInputBorder(borderRadius: BorderRadius.zero, borderSide: BorderSide(color: AppPalette.line)),
-            enabledBorder: const OutlineInputBorder(borderRadius: BorderRadius.zero, borderSide: BorderSide(color: AppPalette.line)),
-            focusedBorder: const OutlineInputBorder(borderRadius: BorderRadius.zero, borderSide: BorderSide(color: AppPalette.accent, width: 1.5)),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 12,
+            ),
+            border: const OutlineInputBorder(
+              borderRadius: BorderRadius.zero,
+              borderSide: BorderSide(color: AppPalette.line),
+            ),
+            enabledBorder: const OutlineInputBorder(
+              borderRadius: BorderRadius.zero,
+              borderSide: BorderSide(color: AppPalette.line),
+            ),
+            focusedBorder: const OutlineInputBorder(
+              borderRadius: BorderRadius.zero,
+              borderSide: BorderSide(color: AppPalette.accent, width: 1.5),
+            ),
           ),
         ),
       ],

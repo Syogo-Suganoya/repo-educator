@@ -16,7 +16,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('repo-educator'), findsOneWidget);
-    expect(find.text('このリポジトリのクイズを生成する'), findsOneWidget);
+    expect(find.text('クイズを作る'), findsOneWidget);
   });
 
   testWidgets('未ログイン時はプライベートリポジトリの導線を出さない', (WidgetTester tester) async {

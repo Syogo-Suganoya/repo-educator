@@ -21,6 +21,7 @@ from app.github_client import (
     InvalidTokenError,
     RateLimitedError,
     RepositoryAccessDeniedError,
+    RepositoryMeta,
     RepositoryNotFoundError,
     RepositoryRef,
     fetch_repository_files,
@@ -40,7 +41,11 @@ from app.schemas import (
     AuthResponse,
     DocAnswerResponse,
     DocQuestionRequest,
-    GithubTokenStatusResponse,
+    FeatureSection,
+    GenerationHistoryItem,
+    GenerationHistoryResponse,
+    GithubTokenListResponse,
+    GithubTokenSummary,
     LoginRequest,
     MeResponse,
     ProgressResponse,
@@ -94,22 +99,32 @@ async def generate_quiz(
     # 出題リクエストがある場合だけは、キュレーション済みデータでは応えられないので生成に回す。
     sample_sections = None if request.focus else get_sample_sections(owner, repo)
     if sample_sections is not None:
+        repository_id = f"{owner}_{repo}_{request.branch}"
+        if not request.from_sample:
+            await _remember_generation(
+                user,
+                request=request,
+                repository_id=repository_id,
+                sections=sample_sections,
+            )
         return QuizGenerateResponse(
-            repository_id=f"{owner}_{repo}_{request.branch}",
+            repository_id=repository_id,
             url=request.repository_url,
             sections=sample_sections,
             docs=get_sample_docs(owner, repo) or [],
         )
 
-    # ログイン済みなら、本人が設定画面で保存したPATを使う（サーバ共有の環境変数とは別物）。
-    user_token: str | None = None
-    if user is not None:
-        user_token = await store.load_github_user_token(user.uid)
+    # ログイン済みなら、本人が登録したPATのうちこのリポジトリを読めるものを使う
+    # （サーバ共有の環境変数とは別物）。
+    try:
+        user_token, repo_meta = await _resolve_user_token(user, owner, repo, request.branch)
+    except RateLimitedError as e:
+        raise HTTPException(status_code=429, detail=_rate_limit_message(e)) from e
 
     # まずリポジトリの最終push時刻だけを見る（GitHub API 1回）。
     # 前回と変化がなければ、コミットSHAの問い合わせもソースの取得も省ける。
     try:
-        ref = await _resolve_ref(owner, repo, request.branch, user_token)
+        ref = await _resolve_ref(owner, repo, request.branch, user_token, repo_meta)
     except RepositoryNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except RepositoryAccessDeniedError as e:
@@ -127,6 +142,9 @@ async def generate_quiz(
         # 出題リクエストがあるときは、観点が違うので既存の結果を使い回さない。
         sections = None if request.focus else cached.sections_for(request.num_questions)
         if sections is not None:
+            await _remember_generation(
+                user, request=request, repository_id=repository_id, sections=sections
+            )
             return QuizGenerateResponse(
                 repository_id=repository_id,
                 url=request.repository_url,
@@ -179,12 +197,44 @@ async def generate_quiz(
     # 生成を待っている間に権限が変わっている可能性もあるので、返す直前にも確認する。
     _ensure_can_read(result, caller_has_access=caller_has_access)
 
+    sections = result.sections_for(request.num_questions) or []
+    await _remember_generation(
+        user, request=request, repository_id=repository_id, sections=sections
+    )
     return QuizGenerateResponse(
         repository_id=repository_id,
         url=request.repository_url,
-        sections=result.sections_for(request.num_questions) or [],
+        sections=sections,
         docs=result.docs,
         cached=False,
+    )
+
+
+def _count_quizzes(sections: list[FeatureSection]) -> int:
+    return sum(len(section.quizzes) for section in sections)
+
+
+async def _remember_generation(
+    user: AuthUser | None,
+    *,
+    request: QuizGenerateRequest,
+    repository_id: str,
+    sections: list[FeatureSection],
+) -> None:
+    """生成したクイズを履歴に残す（ログイン時のみ）。
+
+    未ログインのときはブラウザ側（localStorage）に保存する。サーバに匿名の
+    履歴を持たせると、誰のものか特定できないデータが溜まり続けるため。
+    """
+    if user is None:
+        return
+    await store.record_generation(
+        user.uid,
+        repository_url=request.repository_url,
+        branch=request.branch,
+        repository_id=repository_id,
+        section_count=len(sections),
+        quiz_count=_count_quizzes(sections),
     )
 
 
@@ -203,12 +253,9 @@ async def ask_about_repository(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    user_token: str | None = None
-    if user is not None:
-        user_token = await store.load_github_user_token(user.uid)
-
     try:
-        ref = await _resolve_ref(owner, repo, request.branch, user_token)
+        user_token, repo_meta = await _resolve_user_token(user, owner, repo, request.branch)
+        ref = await _resolve_ref(owner, repo, request.branch, user_token, repo_meta)
         if ref.private and user_token is None:
             raise HTTPException(
                 status_code=403,
@@ -251,8 +298,58 @@ def _rate_limit_message(error: RateLimitedError) -> str:
     return "GitHub API rate limit exceeded. Please retry later."
 
 
+async def _resolve_user_token(
+    user: AuthUser | None, owner: str, repo: str, branch: str
+) -> tuple[str | None, RepositoryMeta | None]:
+    """このリポジトリを読めるトークンを1本選び、取得済みのメタ情報と一緒に返す。
+
+    どのトークンがどのリポジトリに効くかは事前に分からないため、総当たりで探す。
+    ただし毎回全部試すのは無駄なので、成功した組み合わせを記録し、次回はそれを先に試す。
+
+    記録済みの組み合わせが後日失敗することがある（利用者がGitHub側で対象リポジトリを
+    変更した場合）。そのときは記録を捨て、残りのトークンで探し直す。
+
+    戻り値の RepositoryMeta は探索の過程で取得済みのものを使い回す。
+    呼び出し側で取り直すと、同じ問い合わせでレートリミットを二重に消費してしまう。
+    """
+    if user is None:
+        return None, None
+
+    tokens = await store.list_github_tokens(user.uid)
+    if not tokens:
+        return None, None
+
+    bound_id = await store.get_repo_binding(user.uid, owner, repo)
+    # 記録済みのものを先頭に持ってくる。当たれば1回の問い合わせで済む。
+    ordered = sorted(tokens, key=lambda t: t["id"] != bound_id)
+
+    for candidate in ordered:
+        try:
+            meta = await fetch_repository_meta(owner, repo, branch, candidate["token"])
+        except (RepositoryNotFoundError, RepositoryAccessDeniedError):
+            # このトークンでは読めないだけ。次を試す。
+            continue
+        except InvalidTokenError:
+            # 失効したトークン。他のトークンでは読めるかもしれないので続ける。
+            logger.info("Skipping an invalid GitHub token while resolving %s/%s", owner, repo)
+            continue
+
+        if candidate["id"] != bound_id:
+            await store.save_repo_binding(user.uid, owner, repo, candidate["id"])
+        return candidate["token"], meta
+
+    # どのトークンでも読めなかった。古い記録が残っていれば捨てる。
+    if bound_id is not None:
+        await store.delete_repo_binding(user.uid, owner, repo)
+    return None, None
+
+
 async def _resolve_ref(
-    owner: str, repo: str, branch: str, token: str | None
+    owner: str,
+    repo: str,
+    branch: str,
+    token: str | None,
+    meta: RepositoryMeta | None = None,
 ) -> RepositoryRef:
     """対象コミットを決める。GitHubへの問い合わせを最小限に抑える。
 
@@ -264,7 +361,8 @@ async def _resolve_ref(
     そのため「進んでいたら再生成」ではなく「進んでいたらSHAを確認する」に留める。
     SHAが同じなら解析結果はそのまま再利用される。
     """
-    meta = await fetch_repository_meta(owner, repo, branch, token)
+    # トークンの探索時に取得済みなら、同じ問い合わせを繰り返さない。
+    meta = meta or await fetch_repository_meta(owner, repo, branch, token)
     hkey = analysis_cache.head_key(owner, repo, branch)
 
     known = analysis_cache.head_memory_get(hkey) or await store.get_head(owner, repo, branch)
@@ -408,32 +506,57 @@ async def login(request: LoginRequest) -> AuthResponse:
 
 @app.get("/api/v1/me", response_model=MeResponse)
 async def me(user: AuthUser = Depends(require_user)) -> MeResponse:
-    stored = await store.get_user_dict(user.uid) or {}
+    tokens = await store.list_github_tokens(user.uid)
     return MeResponse(
         uid=user.uid,
         email=user.email,
         name=user.name,
         picture=user.picture,
-        github_login=stored.get("github_login"),
-        has_github_token=bool(stored.get("github_token_encrypted")),
+        github_login=tokens[0]["github_login"] if tokens else None,
+        has_github_token=bool(tokens),
+        github_token_count=len(tokens),
     )
 
 
-@app.put("/api/v1/github/token", response_model=GithubTokenStatusResponse)
-async def save_github_token(
+@app.get("/api/v1/github/tokens", response_model=GithubTokenListResponse)
+async def list_github_tokens(user: AuthUser = Depends(require_user)) -> GithubTokenListResponse:
+    """登録済みトークンの一覧。トークンの値そのものは絶対に返さない。"""
+    tokens = await store.list_github_tokens(user.uid)
+    return GithubTokenListResponse(
+        tokens=[
+            GithubTokenSummary(
+                id=t["id"],
+                label=t["label"],
+                github_login=t["github_login"],
+                created_at=t["created_at"],
+            )
+            for t in tokens
+        ]
+    )
+
+
+@app.post("/api/v1/github/tokens", response_model=GithubTokenListResponse)
+async def add_github_token(
     request: SaveGithubTokenRequest,
     user: AuthUser = Depends(require_user),
-) -> GithubTokenStatusResponse:
-    """設定画面から入力されたPersonal Access Tokenを保存する。
+) -> GithubTokenListResponse:
+    """設定画面から入力されたPersonal Access Tokenを追加する。
 
     暗号化してDBに保存する。ログアウトして再ログインしても再入力なしで使えるようにするため。
+    複数登録できる（Fine-grained PAT は対象リポジトリを絞るため、1本では足りないことがある）。
     """
     try:
         github_login = await verify_user_token(request.token)
     except InvalidTokenError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    saved = await store.save_github_user_token(user.uid, request.token, github_login=github_login)
+    label = (request.label or "").strip() or None
+    saved = await store.add_github_token(
+        user.uid,
+        request.token,
+        github_login=github_login,
+        label=label,
+    )
     if not saved:
         # 暗号化鍵未設定などで保存できなかった場合。平文では絶対に保存しない。
         raise HTTPException(
@@ -441,30 +564,49 @@ async def save_github_token(
             detail="Token storage is not available on this server",
         )
 
-    return GithubTokenStatusResponse(has_github_token=True, github_login=github_login)
+    return await list_github_tokens(user)
 
 
-@app.delete("/api/v1/github/token", response_model=GithubTokenStatusResponse)
-async def delete_github_token(user: AuthUser = Depends(require_user)) -> GithubTokenStatusResponse:
-    await store.clear_github_user_token(user.uid)
-    return GithubTokenStatusResponse(has_github_token=False, github_login=None)
+@app.delete("/api/v1/github/tokens/{token_id}", response_model=GithubTokenListResponse)
+async def delete_github_token(
+    token_id: int,
+    user: AuthUser = Depends(require_user),
+) -> GithubTokenListResponse:
+    await store.delete_github_token(user.uid, token_id)
+    return await list_github_tokens(user)
 
 
 @app.get("/api/v1/repositories", response_model=RepositoryListResponse)
 async def list_repositories(user: AuthUser = Depends(require_user)) -> RepositoryListResponse:
-    """保存済みのPATでアクセスできるリポジトリ一覧（プライベート含む）。"""
-    token = await store.load_github_user_token(user.uid)
-    if token is None:
+    """保存済みのPATで読めるプライベートリポジトリの一覧。
+
+    公開リポジトリはURLを貼るだけで解析できるので、この一覧には載せない。
+    ここは「PATを登録しないと辿り着けないもの」だけを見せる導線にする。
+    """
+    tokens = await store.list_github_tokens(user.uid)
+    if not tokens:
         raise HTTPException(
             status_code=400,
             detail="No GitHub token is saved. Add one in account settings first.",
         )
 
-    try:
-        found = await list_my_repositories(token)
-    except InvalidTokenError as e:
-        # 保存済みトークンが失効しているケース。設定画面での再入力を促す。
-        raise HTTPException(status_code=401, detail=str(e)) from e
+    # トークンごとに見えるリポジトリが違うので、全部を集めて重複を除く。
+    found: dict[str, dict] = {}
+    invalid_only = True
+    for entry in tokens:
+        try:
+            for repository in await list_my_repositories(entry["token"]):
+                found.setdefault(repository["full_name"], repository)
+            invalid_only = False
+        except InvalidTokenError:
+            # 1本が失効していても、他のトークンで見える分は返す。
+            logger.info("Skipping an invalid GitHub token while listing repositories")
+
+    if invalid_only:
+        raise HTTPException(
+            status_code=401,
+            detail="The provided GitHub token is invalid or has expired",
+        )
 
     repositories = [
         RepositorySummary(
@@ -475,10 +617,30 @@ async def list_repositories(user: AuthUser = Depends(require_user)) -> Repositor
             description=repository.get("description"),
             language=repository.get("language"),
         )
-        for repository in found
+        for repository in found.values()
+        if repository.get("private")
     ]
     repositories.sort(key=lambda r: r.full_name)
     return RepositoryListResponse(repositories=repositories)
+
+
+@app.get("/api/v1/history", response_model=GenerationHistoryResponse)
+async def list_history(user: AuthUser = Depends(require_user)) -> GenerationHistoryResponse:
+    """このユーザーが生成したクイズの履歴（新しい順）。"""
+    entries = await store.list_generations(user.uid)
+    return GenerationHistoryResponse(
+        history=[GenerationHistoryItem(**entry) for entry in entries]
+    )
+
+
+@app.delete("/api/v1/history")
+async def delete_history(
+    repository_url: str,
+    branch: str = "main",
+    user: AuthUser = Depends(require_user),
+) -> dict[str, bool]:
+    await store.delete_generation(user.uid, repository_url=repository_url, branch=branch)
+    return {"ok": True}
 
 
 # --- 学習履歴 -------------------------------------------------------------

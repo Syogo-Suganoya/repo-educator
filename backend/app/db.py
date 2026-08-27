@@ -10,7 +10,7 @@ DATABASE_URL が未設定の場合はエンジンを作らない。ログイン�
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -43,6 +43,12 @@ class User(Base):
     progress: Mapped[list["LearningProgress"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    history: Mapped[list["GenerationHistory"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    github_tokens: Mapped[list["GithubToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class LearningProgress(Base):
@@ -59,6 +65,82 @@ class LearningProgress(Base):
     last_accessed: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     user: Mapped[User] = relationship(back_populates="progress")
+
+
+class GithubToken(Base):
+    """ユーザーが登録したGitHub Personal Access Token（複数可）。
+
+    Fine-grained PAT は「選んだリポジトリ」しか読めないため、複数の組織や
+    アカウントにまたがると1本では足りない。何本でも登録できるようにしている。
+    """
+
+    __tablename__ = "github_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    github_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # ユーザーがGitHub側で付けたトークン名を、本人が転記したもの。
+    # GitHubには「このトークンの名前」を返すAPIが無い（fine-grained PATにも無く、
+    # classic用の /authorizations は廃止済み）ため、自己申告で受け取るしかない。
+    label: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    token_encrypted: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    user: Mapped[User] = relationship(back_populates="github_tokens")
+
+
+class RepositoryTokenBinding(Base):
+    """「このリポジトリはこのトークンで読めた」という対応の記録。
+
+    どのトークンがどのリポジトリに効くかは事前には分からないので、初回は総当たりで
+    探す。一度成功した組み合わせをここに残しておけば、次回からは1本目で当たる。
+
+    利用者がGitHub側でトークンの対象リポジトリを変更すると、記録済みの組み合わせが
+    後日失敗しうる。そのときはこの記録を捨てて、もう一度総当たりし直す。
+    """
+
+    __tablename__ = "repository_token_bindings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "owner", "repo", name="uq_binding_user_owner_repo"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    owner: Mapped[str] = mapped_column(String(255))
+    repo: Mapped[str] = mapped_column(String(255))
+    token_id: Mapped[int] = mapped_column(Integer, ForeignKey("github_tokens.id", ondelete="CASCADE"))
+    last_verified: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class GenerationHistory(Base):
+    """ユーザーが生成したクイズの履歴。
+
+    クイズの中身そのものは持たない。解析結果は analysis_cache にコミット単位で
+    入っているので、ここは「どのリポジトリのどのブランチを開いたか」だけを覚え、
+    開き直すときは通常の生成APIを呼ぶ（キャッシュに当たれば即座に返る）。
+    同じリポジトリを何度開いても行が増えないよう、user_id + url + branch で一意にする。
+    """
+
+    __tablename__ = "generation_history"
+    __table_args__ = (
+        UniqueConstraint("user_id", "repository_url", "branch", name="uq_history_user_repo_branch"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    repository_url: Mapped[str] = mapped_column(String(512))
+    branch: Mapped[str] = mapped_column(String(255))
+    repository_id: Mapped[str] = mapped_column(String(512))
+    section_count: Mapped[int] = mapped_column(Integer, default=0)
+    quiz_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_opened: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="history")
 
 
 class RepositoryHead(Base):
@@ -116,6 +198,12 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+# 後から追加した列。既存のDBにも当てられるよう IF NOT EXISTS で流す。
+_ADD_COLUMNS = [
+    "ALTER TABLE github_tokens ADD COLUMN IF NOT EXISTS label VARCHAR(60)",
+]
+
+
 async def init_models() -> None:
     """テーブルが無ければ作成する。
 
@@ -126,3 +214,6 @@ async def init_models() -> None:
         return
     async with _get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all は既存テーブルに列を足さない。後から増えた列はここで補う。
+        for statement in _ADD_COLUMNS:
+            await conn.execute(text(statement))

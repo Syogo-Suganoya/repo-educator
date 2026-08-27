@@ -49,7 +49,12 @@ TextSpan highlightLine(String line, {required TextStyle baseStyle}) {
     if (match.start > index) {
       spans.add(TextSpan(text: line.substring(index, match.start)));
     }
-    spans.add(TextSpan(text: match[0], style: TextStyle(color: _colorFor(match))));
+    spans.add(
+      TextSpan(
+        text: match[0],
+        style: TextStyle(color: _colorFor(match)),
+      ),
+    );
     index = match.end;
   }
   if (index < line.length) {
@@ -66,7 +71,9 @@ Color _colorFor(RegExpMatch match) {
   if (match.namedGroup('number') != null) return CodePalette.number;
   // 呼び出し・定義の直前にある識別子。`if (` のように予約語のこともある。
   if (match.namedGroup('word') != null) {
-    return _keywords.contains(match[0]) ? CodePalette.keyword : CodePalette.call;
+    return _keywords.contains(match[0])
+        ? CodePalette.keyword
+        : CodePalette.call;
   }
   // それ以外の識別子は、予約語のときだけ色を付ける。
   // 変数名まで塗ると画面がうるさくなり、かえって読みにくい。
@@ -80,7 +87,9 @@ Color _colorFor(RegExpMatch match) {
 /// すべての識別子を色分けすると、かえって画面がうるさくなるため。
 final _tokenPattern = RegExp(
   r'(?<comment>#.*$|//.*$)'
-  r'|(?<string>"(?:\\.|[^"\\])*"|' "'(?:\\\\.|[^'\\\\])*'" r')'
+  r'|(?<string>"(?:\\.|[^"\\])*"|'
+  "'(?:\\\\.|[^'\\\\])*'"
+  r')'
   r'|(?<decorator>@[A-Za-z_][A-Za-z0-9_]*)'
   r'|(?<number>\b\d+(?:\.\d+)?\b)'
   r'|(?<word>\b[A-Za-z_][A-Za-z0-9_]*\b(?=\s*\())'

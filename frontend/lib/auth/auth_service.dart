@@ -45,7 +45,11 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _persist({required String token, required String email, String? name}) async {
+  Future<void> _persist({
+    required String token,
+    required String email,
+    String? name,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tokenKey, token);
     await prefs.setString(_emailKey, email);
@@ -60,13 +64,18 @@ class AuthService extends ChangeNotifier {
     if (response.statusCode != 200) {
       String detail;
       try {
-        detail = (jsonDecode(utf8.decode(response.bodyBytes))['detail'] ?? '').toString();
+        detail = (jsonDecode(utf8.decode(response.bodyBytes))['detail'] ?? '')
+            .toString();
       } catch (_) {
         detail = '';
       }
-      throw AuthException(detail.isNotEmpty ? detail : '認証に失敗しました。', statusCode: response.statusCode);
+      throw AuthException(
+        detail.isNotEmpty ? detail : '認証に失敗しました。',
+        statusCode: response.statusCode,
+      );
     }
-    final body = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    final body =
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     final token = body['access_token'] as String;
     final email = body['email'] as String;
     final name = body['name'] as String?;
@@ -78,11 +87,19 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> register({required String email, required String password, String? displayName}) async {
+  Future<void> register({
+    required String email,
+    required String password,
+    String? displayName,
+  }) async {
     final response = await http.post(
       Uri.parse('$_apiBaseUrl/api/v1/auth/register'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'email': email, 'password': password, 'display_name': displayName}),
+      body: jsonEncode({
+        'email': email,
+        'password': password,
+        'display_name': displayName,
+      }),
     );
     await _handleAuthResponse(response);
   }
