@@ -8,15 +8,9 @@ Gemini 1.5 の廃止時に両方を直す必要があった。同じことを繰
 モデルIDは環境変数 GEMINI_MODEL で差し替えられるようにしている。
 
 接続方式について:
-  GCPプロジェクト・IAMを経由する Vertex AI ではなく、単体のAPIキーで
-  ai.google.dev のGemini Developer APIを直接呼ぶ。Firestore等の他機能とは
-  完全に独立しており、GCPプロジェクトの設定と関係なくGeminiだけを使える。
-
-SDKについて:
-  旧 `vertexai.generative_models`（google-cloud-aiplatform）は
-  2025-06-24に非推奨化され2026-06-24に削除された。
-  現在は `google-genai` が唯一のサポート対象で、新しいGeminiモデルは
-  こちらからしか使えない。
+  `google-genai` SDK で ai.google.dev のGemini Developer APIを直接呼ぶ。
+  認証はAPIキー1本。DBや認証など他の機能の設定とは完全に独立しており、
+  それらが未設定でもGeminiだけは動く。
 """
 
 import json
@@ -32,6 +26,15 @@ _client = None
 
 class GeminiError(Exception):
     """Geminiの呼び出しまたは応答の解析に失敗した。"""
+
+
+class GeminiQuotaExceededError(GeminiError):
+    """APIキーの利用枠を使い切った（429）。
+
+    一時的な混雑（503）と違い、待っても短時間では回復しない。
+    無料枠は「1日あたりのリクエスト数」で、1回の解析でクイズとドキュメントの
+    2リクエストを消費する点に注意。
+    """
 
 
 def _get_client():
@@ -69,11 +72,30 @@ async def generate_json(
     if max_output_tokens is not None:
         config.max_output_tokens = max_output_tokens
 
-    response = await _get_client().aio.models.generate_content(
-        model=settings.gemini_model,
-        contents=prompt,
-        config=config,
-    )
+    from google.genai import errors as genai_errors
+
+    try:
+        response = await _get_client().aio.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=config,
+        )
+    except genai_errors.APIError as e:
+        # モデルの混雑（503）や利用枠超過（429）はSDKがリトライし尽くした後にここへ来る。
+        # 呼び出し側にGemini固有の例外を漏らさず、GeminiError系に変換する。
+        # 429だけは「待っても直らない」ため、利用者への案内を変えられるよう別型にする。
+        if getattr(e, "code", None) == 429:
+            raise GeminiQuotaExceededError(f"Gemini quota exceeded: {e}") from e
+        raise GeminiError(f"Gemini API call failed: {e}") from e
+
+    # 出力途中で上限に達した場合、JSONは必ず壊れている。
+    # json.loads の失敗として扱うより、原因の分かる形で先に弾く。
+    # 現行モデルは思考モデルで、思考トークンも max_output_tokens を消費する点に注意。
+    candidates = response.candidates or []
+    if candidates and str(candidates[0].finish_reason) == "FinishReason.MAX_TOKENS":
+        raise GeminiError(
+            "Gemini hit the output token limit before completing the JSON"
+        )
 
     text = response.text
     if not text:

@@ -20,6 +20,7 @@ class WorkspacePage extends StatefulWidget {
     required this.repositoryId,
     required this.sections,
     required this.apiClient,
+    this.branch = 'main',
     this.docs = const [],
     this.initialTab = WorkspaceTab.review,
   });
@@ -28,6 +29,9 @@ class WorkspacePage extends StatefulWidget {
   final String repositoryId;
   final List<FeatureSection> sections;
   final ApiClient apiClient;
+
+  /// 出題リクエストで作り直すときに、同じブランチを指すために必要。
+  final String branch;
   final List<DocEntry> docs;
   final WorkspaceTab initialTab;
 
@@ -45,6 +49,57 @@ class _WorkspacePageState extends State<WorkspacePage> {
   final Map<int, _SectionProgress> _progress = {};
   late WorkspaceTab _tab = widget.initialTab;
 
+  /// 出題リクエストで差し替わるため、セクションは状態として持つ。
+  late List<FeatureSection> _sections = widget.sections;
+  final _focusController = TextEditingController();
+  bool _regenerating = false;
+  String? _regenerateError;
+
+  /// 直前に投げた出題リクエスト。今どの観点のクイズを見ているかを示すために保持する。
+  String? _activeFocus;
+
+  @override
+  void dispose() {
+    _focusController.dispose();
+    super.dispose();
+  }
+
+  /// 自由文の出題リクエストでクイズを作り直す。
+  /// ドキュメントは観点に依存しないので、元の内容をそのまま使い続ける。
+  Future<void> _requestFocusedQuizzes() async {
+    final text = _focusController.text.trim();
+    if (text.isEmpty || _regenerating) return;
+
+    setState(() {
+      _regenerating = true;
+      _regenerateError = null;
+    });
+
+    try {
+      final result = await widget.apiClient.generateQuiz(
+        repositoryUrl: widget.repositoryUrl,
+        branch: widget.branch,
+        focus: text,
+      );
+      if (!mounted) return;
+      setState(() {
+        _sections = result.sections;
+        _activeFocus = text;
+        _focusController.clear();
+        // セクションの構成が変わるので、進捗と選択はやり直しになる。
+        _progress.clear();
+        _selectedIndex = result.sections.isEmpty ? null : 0;
+        _tab = WorkspaceTab.review;
+      });
+    } on QuizApiException catch (e) {
+      if (mounted) setState(() => _regenerateError = e.toUserMessage());
+    } catch (_) {
+      if (mounted) setState(() => _regenerateError = 'サーバーに接続できませんでした。');
+    } finally {
+      if (mounted) setState(() => _regenerating = false);
+    }
+  }
+
   _SectionProgress _progressFor(int sectionIndex) => _progress.putIfAbsent(sectionIndex, () => _SectionProgress());
 
   void _selectSection(int index) {
@@ -54,7 +109,7 @@ class _WorkspacePageState extends State<WorkspacePage> {
   /// ドキュメントから対応するクイズセクションへ飛ぶ。
   /// セクション名が一致しない場合は何もしない（生成結果が食い違うことがあるため）。
   void _openSectionByTitle(String sectionTitle) {
-    final index = widget.sections.indexWhere((s) => s.title == sectionTitle);
+    final index = _sections.indexWhere((s) => s.title == sectionTitle);
     if (index < 0) return;
     setState(() {
       _tab = WorkspaceTab.review;
@@ -107,7 +162,13 @@ class _WorkspacePageState extends State<WorkspacePage> {
           ),
           Expanded(
             child: _tab == WorkspaceTab.docs
-                ? DocsView(docs: widget.docs, onOpenSection: _openSectionByTitle)
+                ? DocsView(
+                    docs: widget.docs,
+                    apiClient: widget.apiClient,
+                    repositoryUrl: widget.repositoryUrl,
+                    branch: widget.branch,
+                    onOpenSection: _openSectionByTitle,
+                  )
                 : _reviewBody(isNarrow),
           ),
         ],
@@ -117,14 +178,14 @@ class _WorkspacePageState extends State<WorkspacePage> {
 
   Widget _reviewBody(bool isNarrow) {
     final sidebar = _SectionSidebar(
-      sections: widget.sections,
+      sections: _sections,
       selectedIndex: _selectedIndex,
       progress: _progress,
       horizontal: isNarrow,
       onSelect: _selectSection,
     );
     final content = _MainContent(
-      sections: widget.sections,
+      sections: _sections,
       selectedIndex: _selectedIndex,
       progress: _progress,
       onSelectAnswer: _selectAnswer,
@@ -132,9 +193,133 @@ class _WorkspacePageState extends State<WorkspacePage> {
       onRetry: _retry,
     );
 
-    return isNarrow
+    final body = isNarrow
         ? Column(children: [sidebar, Expanded(child: content)])
         : Row(children: [sidebar, Expanded(child: content)]);
+
+    return Column(
+      children: [
+        Expanded(child: body),
+        _FocusComposer(
+          controller: _focusController,
+          busy: _regenerating,
+          errorMessage: _regenerateError,
+          activeFocus: _activeFocus,
+          onSubmit: _requestFocusedQuizzes,
+        ),
+      ],
+    );
+  }
+}
+
+/// 画面下部の入力欄。「認証まわりだけ出して」のように、
+/// 見たい範囲を自由文で指定してクイズを作り直す。
+class _FocusComposer extends StatelessWidget {
+  const _FocusComposer({
+    required this.controller,
+    required this.busy,
+    required this.errorMessage,
+    required this.activeFocus,
+    required this.onSubmit,
+  });
+
+  final TextEditingController controller;
+  final bool busy;
+  final String? errorMessage;
+  final String? activeFocus;
+  final VoidCallback onSubmit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppPalette.bg,
+        border: Border(top: BorderSide(color: AppPalette.line)),
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (activeFocus != null) ...[
+            Row(
+              children: [
+                const Icon(Icons.filter_alt_outlined, size: 14, color: AppPalette.accent),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '「$activeFocus」で出題中',
+                    style: appMono(11.5, color: AppPalette.accent, weight: FontWeight.w700),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+          if (errorMessage != null) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              color: AppPalette.removeSoft,
+              child: Text(errorMessage!, style: appMono(12, color: AppPalette.remove)),
+            ),
+            const SizedBox(height: 8),
+          ],
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  enabled: !busy,
+                  style: appMono(13, color: AppPalette.ink),
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => onSubmit(),
+                  decoration: InputDecoration(
+                    hintText: '出題してほしい範囲を書いてください（例: 認証まわり / エラー処理を重点的に）',
+                    hintStyle: appMono(12.5, color: AppPalette.inkMuted.withValues(alpha: 0.6)),
+                    prefixIcon: const Icon(Icons.chat_bubble_outline, size: 16, color: AppPalette.inkMuted),
+                    isDense: true,
+                    filled: true,
+                    fillColor: AppPalette.surface,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                    border: const OutlineInputBorder(
+                      borderRadius: BorderRadius.zero,
+                      borderSide: BorderSide(color: AppPalette.line),
+                    ),
+                    enabledBorder: const OutlineInputBorder(
+                      borderRadius: BorderRadius.zero,
+                      borderSide: BorderSide(color: AppPalette.line),
+                    ),
+                    focusedBorder: const OutlineInputBorder(
+                      borderRadius: BorderRadius.zero,
+                      borderSide: BorderSide(color: AppPalette.accent, width: 1.5),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton(
+                onPressed: busy ? null : onSubmit,
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppPalette.accent,
+                  foregroundColor: Colors.white,
+                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                ),
+                child: busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
+                    : Text('作る', style: appMono(12.5, color: Colors.white, weight: FontWeight.w700)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -390,7 +575,7 @@ class _SectionTileState extends State<_SectionTile> {
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text(
+                      AppText(
                         section.description,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -490,13 +675,20 @@ class _MainContent extends StatelessWidget {
               const SizedBox(height: 20),
               DiffCard(
                 filePath: quiz.filePath,
-                meta: DiffStatBadge(added: answered && isCorrect ? 1 : 0, removed: answered && !isCorrect ? 1 : 0),
+                // 正誤は空欄行の色・選択肢のチェック・レビューコメントで十分伝わるため、
+                // 増減行数のバッジは出さない（差分の行数を表す記号としては誤解を招く）。
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // 主役は設問。場面の説明はその後ろに、控えめな体裁で置く。
+                    AppText(
+                      quiz.questionText,
+                      style: appBody(18, weight: FontWeight.w700, height: 1.55),
+                      markBlanks: true,
+                      blankColor: revealColor,
+                    ),
+                    const SizedBox(height: 12),
                     _ScenarioNote(scenario: quiz.scenario),
-                    const SizedBox(height: 14),
-                    Text(quiz.questionText, style: appBody(18, weight: FontWeight.w700, height: 1.55)),
                     const SizedBox(height: 16),
                     DiffCodeBlock(code: quiz.codeSnippet, revealColor: revealColor),
                     const SizedBox(height: 20),
@@ -671,7 +863,7 @@ class _NeedsChangesCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(quiz.questionText, style: appBody(15, weight: FontWeight.w700, height: 1.6)),
+          AppText(quiz.questionText, style: appBody(15, weight: FontWeight.w700, height: 1.6)),
           const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -695,7 +887,7 @@ class _NeedsChangesCard extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.all(12),
             color: AppPalette.surfaceSunken,
-            child: Text(quiz.explanation, style: appBody(13.5, color: AppPalette.ink, height: 1.7)),
+            child: AppText(quiz.explanation, style: appBody(13.5, color: AppPalette.ink, height: 1.7)),
           ),
         ],
       ),
@@ -711,19 +903,17 @@ class _ScenarioNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 解答には不要な補足なので、設問より弱い見た目にする。
+    // 以前は塗りつぶしの色面で最も目立っており、重要度と視覚的な強さが逆転していた。
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      color: AppPalette.accentSoft,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.flag_outlined, size: 15, color: AppPalette.accent),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(scenario, style: appMono(12, color: AppPalette.accent, weight: FontWeight.w600, height: 1.6)),
-          ),
-        ],
+      padding: const EdgeInsets.only(left: 10),
+      decoration: const BoxDecoration(
+        border: Border(left: BorderSide(color: AppPalette.line, width: 2)),
+      ),
+      child: AppText(
+        scenario,
+        style: appBody(13, color: AppPalette.inkMuted, height: 1.7),
       ),
     );
   }
@@ -832,7 +1022,7 @@ class _ReviewComment extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          Text(explanation, style: appBody(14, color: AppPalette.ink, height: 1.7)),
+          AppText(explanation, style: appBody(14, color: AppPalette.ink, height: 1.7)),
         ],
       ),
     );

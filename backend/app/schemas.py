@@ -61,6 +61,24 @@ class QuizGenerateRequest(BaseModel):
     num_questions: int = Field(default=5, ge=1, le=20)
     focus_language: str | None = None
 
+    # 利用者が自由文で指定する出題の観点（例:「認証まわりだけ」「エラーハンドリングを重点的に」）。
+    # 指定があるとキャッシュを使わず、その都度その観点で生成し直す。
+    focus: str | None = Field(default=None, max_length=300)
+
+
+class DocQuestionRequest(BaseModel):
+    """ドキュメントタブから投げる、リポジトリについての質問。"""
+
+    repository_url: str
+    branch: str = "main"
+    question: str = Field(min_length=1, max_length=500)
+
+
+class DocAnswerResponse(BaseModel):
+    answer: str
+    # 回答の根拠にしたファイル。利用者が実物を確認しに行けるようにする。
+    file_paths: list[str] = []
+
 
 class QuizGenerateResponse(BaseModel):
     repository_id: str

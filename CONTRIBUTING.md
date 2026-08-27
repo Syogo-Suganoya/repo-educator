@@ -70,7 +70,7 @@ docker compose up --build
 | 変数 | 説明 |
 |---|---|
 | `GITHUB_TOKEN` | サーバ共有のGitHub PAT。未ログインでの公開リポジトリ取得に使う。未設定でも動くがレートリミットが厳しくなる（60req/h）。**ユーザー個別のトークンはここには置かない** |
-| `GEMINI_API_KEY` | Geminiの利用に必要。[ai.google.dev](https://aistudio.google.com/apikey) で発行するAPIキー1本。**GCPプロジェクトは不要**（Vertex AIは使っていない） |
+| `GEMINI_API_KEY` | Geminiの利用に必要。[ai.google.dev](https://aistudio.google.com/apikey) で発行するAPIキー1本。**GCPプロジェクトは不要** |
 | `GEMINI_MODEL` | 使用するGeminiモデル（既定: `gemini-3.5-flash`）。廃止時はここだけ変えればよい |
 | `DATABASE_URL` | PostgreSQLの接続文字列。空ならログイン機能・履歴・解析結果キャッシュがすべて無効になる。ローカルは `docker-compose.yml` の `db` サービスを指す既定値、本番はNeon等に差し替える |
 | `JWT_SECRET` | JWTの署名鍵。空ならログイン機能が無効になる。ランダムな文字列を設定する |
@@ -141,7 +141,7 @@ flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8000
 
 ### プライベートリポジトリを試す
 
-ログイン後、アカウントメニューの「GitHubトークン」から Personal Access Token を入力する。バックエンドが `GET /user` で有効性を確認したうえで保存するため、無効な値は保存されない。GitHub App のインストールのような追加設定は不要。
+ログイン後、アカウントメニューの「GitHubトークン」から Personal Access Token を入力する。バックエンドが `GET /user` で有効性を確認したうえで保存するため、無効な値は保存されない。
 
 ## 開発フロー
 
@@ -155,7 +155,7 @@ flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8000
 
 ## 認証（ID / パスワード）
 
-**本人確認は自前実装のメールアドレス + パスワード認証。GitHub SSOなどの外部IdPには依存しない。**
+**本人確認はメールアドレス + パスワード認証（JWT）。**
 
 - パスワードは `bcrypt` でハッシュ化して `users.hashed_password` に保存する。平文は一切保存しない
 - ログイン成功時に `PyJWT`（HS256、署名鍵は `JWT_SECRET`）でJWTを発行する。有効期限は `JWT_EXPIRES_DAYS`（既定30日）
@@ -175,8 +175,8 @@ flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8000
 
 **Gemini への接続は `app/gemini.py` の `generate_json()` に集約してある。** クイズ生成もドキュメント生成もここを経由する。SDKやモデルを直接触るコードを他のファイルに増やさないこと。
 
-- **SDKは `google-genai`。** 旧 `vertexai.generative_models`（`google-cloud-aiplatform`）は2026年6月24日に**削除済み**で、新しいGeminiモデルは使えない
-- **接続は Gemini Developer API（`GEMINI_API_KEY` 1本）。Vertex AI は使わない。** `genai.Client(api_key=...)` で初期化しており、`vertexai=True` は指定しない。GCPプロジェクトはこの接続には不要
+- **SDKは `google-genai`。**
+- **接続は Gemini Developer API（`GEMINI_API_KEY` 1本）。** `genai.Client(api_key=...)` で初期化する。GCPプロジェクトはこの接続には不要
 - 呼び出しは `client.aio.models.generate_content`（非同期）。クイズとドキュメントを `asyncio.gather` で並行実行するため、同期版でイベントループを塞いではいけない
 - クライアントはプロセスで1つだけ遅延生成する
 

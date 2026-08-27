@@ -4,9 +4,7 @@
 環境変数としてサーバに焼き込むトークンは扱わない（1ユーザー1トークンとして
 DBに保存し、ログアウト後も残る）。
 
-Cloud KMSではなく `cryptography.fernet` によるアプリ側の対称鍵暗号化を使う。
-認証基盤全体をGCPから切り離した（Firebase Auth → 自前JWT、Firestore → Postgres）
-のに合わせ、暗号化だけGCP依存を残す理由がないため。
+暗号化は `cryptography.fernet` による対称鍵方式。鍵は環境変数 ENCRYPTION_KEY で渡す。
 
 ENCRYPTION_KEY が未設定のローカル開発では、暗号化できないトークンを平文で保存する
 くらいなら保存しない方がよいため、encrypt は None を返す。

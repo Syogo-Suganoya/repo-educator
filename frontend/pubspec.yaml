@@ -37,6 +37,7 @@ dependencies:
   http: ^1.6.0
   google_fonts: ^8.2.0
   shared_preferences: ^2.3.3
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:

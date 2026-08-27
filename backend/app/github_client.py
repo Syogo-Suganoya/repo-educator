@@ -90,7 +90,7 @@ async def verify_user_token(token: str) -> str | None:
 async def list_my_repositories(token: str) -> list[dict]:
     """PATを持つ本人がアクセスできるリポジトリ一覧（プライベート含む）。
 
-    installation という概念がないぶん、GitHub App方式より単純: 保存済みの
+    保存済みの
     ユーザー自身のトークンでそのまま `GET /user/repos` を叩くだけでよい。
     """
     repositories: list[dict] = []
@@ -136,12 +136,27 @@ def _auth_headers(token: str | None) -> dict[str, str]:
 
 
 def _check_response(
-    response: httpx.Response, owner: str, repo: str, branch: str, *, authenticated: bool
+    response: httpx.Response,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    authenticated: bool,
+    repo_accessible: bool = False,
 ) -> None:
     """GitHubのエラー応答を、案内可能な3種類の例外に振り分ける。
 
     GitHubはレートリミットにも権限不足にも403を返すため、
     残リクエスト数ヘッダーを見て区別する。
+
+    `authenticated` は「利用者自身のトークンで問い合わせたか」を表す。
+    サーバ共有トークン（レートリミット緩和用）でAuthorizationが付いていても、
+    それは利用者の権限ではないため False として扱う。
+
+    また、非公開リポジトリは未認証だと404で隠されるため、
+    「存在しない」と「権限がない」は応答だけでは区別できない。
+    ただし repo_accessible=True（リポジトリ自体は既に読めている）の場合は
+    権限の問題ではありえないので、ブランチ名の誤りとして扱う。
     """
     if response.status_code not in (403, 404, 422, 429):
         return
@@ -151,8 +166,16 @@ def _check_response(
         reset = response.headers.get("x-ratelimit-reset")
         raise RateLimitedError(int(reset) if reset and reset.isdigit() else None)
 
+    if repo_accessible:
+        raise RepositoryNotFoundError(f"Branch '{branch}' was not found in {owner}/{repo}")
     if authenticated:
-        raise RepositoryNotFoundError(f"{owner}/{repo}@{branch} not found")
+        # Fine-grained PAT は「対象に選んでいないリポジトリ」も404で隠す。
+        # URLの誤りと権限不足を応答から区別できないため、両方の可能性を伝える。
+        raise RepositoryNotFoundError(
+            f"{owner}/{repo} not found, or your GitHub token does not grant access to it"
+        )
+    # 利用者自身のトークンがない場合。サーバ共有トークンで問い合わせていても、
+    # 「あなたの権限では読めない」ことに変わりはないので、PAT登録へ誘導する。
     raise RepositoryAccessDeniedError(
         f"{owner}/{repo}@{branch} not found or not accessible without authentication"
     )
@@ -169,7 +192,9 @@ async def fetch_repository_meta(
     前回見た pushed_at と変化がなければ、コミットSHAの問い合わせすら省ける。
     """
     headers = _auth_headers(token)
-    authenticated = "Authorization" in headers
+    # サーバ共有トークンで付いたAuthorizationは「この利用者の権限」ではない。
+    # 案内の分岐は利用者自身がトークンを持っているかで決める。
+    authenticated = token is not None
 
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
         resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}")
@@ -195,11 +220,17 @@ async def resolve_commit_sha(
     変化のないリポジトリへの再訪問ではこの1回も省ける。
     """
     headers = _auth_headers(token)
-    authenticated = "Authorization" in headers
+    # サーバ共有トークンで付いたAuthorizationは「この利用者の権限」ではない。
+    # 案内の分岐は利用者自身がトークンを持っているかで決める。
+    authenticated = token is not None
 
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
         resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}/commits/{branch}")
-        _check_response(resp, owner, repo, branch, authenticated=authenticated)
+        # ここへ来る時点でリポジトリ情報の取得は成功しているため、
+        # 失敗するとすればブランチ名が原因である。
+        _check_response(
+            resp, owner, repo, branch, authenticated=authenticated, repo_accessible=True
+        )
         resp.raise_for_status()
         return resp.json().get("sha", branch)
 
@@ -218,7 +249,9 @@ async def fetch_repository_files(
     **キャッシュがミスしたときにだけ呼ぶこと。**
     """
     headers = _auth_headers(token)
-    authenticated = "Authorization" in headers
+    # サーバ共有トークンで付いたAuthorizationは「この利用者の権限」ではない。
+    # 案内の分岐は利用者自身がトークンを持っているかで決める。
+    authenticated = token is not None
     owner, repo = ref.owner, ref.repo
 
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:

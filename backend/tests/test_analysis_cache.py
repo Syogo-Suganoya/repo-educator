@@ -1,6 +1,6 @@
 """キャッシュとsingle-flightの振る舞いを固定するテスト。
 
-外部（GitHub / Vertex AI）には一切アクセスしない。
+外部（GitHub / Gemini）には一切アクセスしない。
 実行: docker compose exec backend python -m pytest tests -q
 """
 
@@ -182,9 +182,14 @@ class TestErrorClassification:
         headers = {} if remaining is None else {"x-ratelimit-remaining": remaining}
         return httpx.Response(status, headers=headers)
 
-    def _check(self, status, remaining=None, authenticated=False):
+    def _check(self, status, remaining=None, authenticated=False, repo_accessible=False):
         _check_response(
-            self._response(status, remaining), "o", "r", "main", authenticated=authenticated
+            self._response(status, remaining),
+            "o",
+            "r",
+            "main",
+            authenticated=authenticated,
+            repo_accessible=repo_accessible,
         )
 
     def test_rate_limit_is_not_access_denied(self):
@@ -208,6 +213,31 @@ class TestErrorClassification:
     def test_404_authenticated_is_not_found(self):
         with pytest.raises(RepositoryNotFoundError):
             self._check(404, authenticated=True)
+
+    def test_404_authenticated_mentions_token_scope(self):
+        # Fine-grained PAT は対象に選んでいないリポジトリも404で隠す。
+        # 「URLが違う」と断定せず、トークンの対象設定も疑えるようにする。
+        with pytest.raises(RepositoryNotFoundError) as e:
+            self._check(404, authenticated=True)
+        assert "does not grant access" in str(e.value)
+
+    def test_404_on_accessible_repo_is_branch_not_found(self):
+        # リポジトリ情報の取得に成功した後の404は、ブランチ名の誤り以外にありえない。
+        # 未認証でも「権限がない」と誤って案内しないこと。
+        with pytest.raises(RepositoryNotFoundError) as e:
+            self._check(404, repo_accessible=True)
+        assert "Branch 'main'" in str(e.value)
+
+    def test_rate_limit_wins_over_accessible_repo(self):
+        # レートリミットの判定は他のどの分類よりも先に行われること。
+        with pytest.raises(RateLimitedError):
+            self._check(403, remaining="0", repo_accessible=True)
+
+    def test_shared_server_token_does_not_count_as_caller_access(self):
+        # レートリミット緩和用のサーバ共有トークンでAuthorizationが付いていても、
+        # 利用者本人の権限ではないため、PAT登録へ誘導する側に倒すこと。
+        with pytest.raises(RepositoryAccessDeniedError):
+            self._check(404, authenticated=False)
 
     def test_success_passes_through(self):
         self._check(200)

@@ -6,7 +6,7 @@ import 'auth_service.dart';
 /// メールアドレス + パスワードでのログイン・新規登録ダイアログ。
 ///
 /// 1つのダイアログで「ログイン」「新規登録」を切り替える。
-/// GitHubなどのSSOは使わない（本人確認はこのアプリ内で完結する）。
+/// 本人確認はこのアプリ内で完結する。
 class LoginDialog extends StatefulWidget {
   const LoginDialog({super.key, required this.authService});
 

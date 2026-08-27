@@ -178,7 +178,9 @@ async def generate_docs(
         prompt=_build_prompt(files, focus_language),
         response_schema=DOC_RESPONSE_SCHEMA,
         # 4種類の索引を一度に生成するため出力が長くなりやすい。
-        max_output_tokens=8192,
+        # 加えて現行モデルは思考モデルで、思考トークンもこの上限を消費する
+        # （小さな入力でも思考だけで2,700前後）。8192ではJSONが途中で切れるため広めに取る。
+        max_output_tokens=32768,
     )
 
     docs: list[DocEntry] = []

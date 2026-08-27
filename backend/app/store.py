@@ -64,7 +64,7 @@ async def create_user(*, email: str, hashed_password: str, display_name: str | N
 
 
 async def get_user_dict(uid: str) -> dict[str, Any] | None:
-    """他の関数が Firestore 時代と同じ辞書形状で扱えるようにする互換ヘルパー。"""
+    """ユーザー情報を辞書として返すヘルパー。"""
     user = await get_user_by_id(uuid.UUID(uid))
     if user is None:
         return None

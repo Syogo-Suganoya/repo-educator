@@ -14,20 +14,29 @@ class GithubTokenDialog extends StatefulWidget {
     super.key,
     required this.apiClient,
     required this.initialAccount,
+    this.onShowPatGuide,
   });
 
   final ApiClient apiClient;
   final AccountInfo initialAccount;
+
+  /// 取得手順はトップページに置いてあるので、ここでは案内するだけにする。
+  final VoidCallback? onShowPatGuide;
 
   /// ダイアログを開く。保存・削除に成功した場合は最新の AccountInfo を返す。
   static Future<AccountInfo?> show(
     BuildContext context, {
     required ApiClient apiClient,
     required AccountInfo account,
+    VoidCallback? onShowPatGuide,
   }) {
     return showDialog<AccountInfo>(
       context: context,
-      builder: (_) => GithubTokenDialog(apiClient: apiClient, initialAccount: account),
+      builder: (_) => GithubTokenDialog(
+        apiClient: apiClient,
+        initialAccount: account,
+        onShowPatGuide: onShowPatGuide,
+      ),
     );
   }
 
@@ -99,12 +108,39 @@ class _GithubTokenDialogState extends State<GithubTokenDialog> {
             children: [
               Text('GitHubトークン', style: appDisplay(18, weight: FontWeight.w800)),
               const SizedBox(height: 10),
-              Text(
-                'プライベートリポジトリを学習するには、読み取り権限のある '
-                'Personal Access Token を入力してください。サーバーに暗号化して保存し、'
-                'ログアウトしても残ります。',
+              AppText(
+                'プライベートリポジトリを学習するには、GitHubのPersonal Access Token（PAT）を'
+                '入力してください。サーバーに暗号化して保存し、ログアウトしても残ります。',
                 style: appBody(13.5, color: AppPalette.inkMuted, height: 1.7),
               ),
+              const SizedBox(height: 12),
+              // 手順そのものはトップページに1箇所だけ置き、ここからはそこへ案内する。
+              // 同じ内容を2箇所に書くと、片方だけ古くなる。
+              if (widget.onShowPatGuide != null)
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      widget.onShowPatGuide!();
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.help_outline, size: 15, color: AppPalette.accent),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: Text(
+                              'PATの取得手順と必要な権限を見る',
+                              style: appMono(12, color: AppPalette.accent, weight: FontWeight.w700),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               const SizedBox(height: 16),
               if (_account.hasGithubToken) ...[
                 Container(
@@ -133,7 +169,7 @@ class _GithubTokenDialogState extends State<GithubTokenDialog> {
                 obscureText: true,
                 style: appMono(13, color: AppPalette.ink),
                 decoration: InputDecoration(
-                  hintText: 'ghp_...',
+                  hintText: 'github_pat_...',
                   hintStyle: appMono(13, color: AppPalette.inkMuted.withValues(alpha: 0.5)),
                   isDense: true,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
@@ -144,7 +180,7 @@ class _GithubTokenDialogState extends State<GithubTokenDialog> {
               ),
               const SizedBox(height: 8),
               Text(
-                '権限は "repo"（Fine-grainedなら対象リポジトリのRead-only）のみで十分です。',
+                'github_pat_... で始まる文字列です。発行直後の画面でしか表示されません。',
                 style: appMono(11, color: AppPalette.inkMuted),
               ),
               if (_errorMessage != null) ...[

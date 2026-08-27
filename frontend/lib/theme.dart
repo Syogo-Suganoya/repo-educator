@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'code_highlight.dart';
 
 /// デザインの核: 「コードレビュー」のメタファー。
 /// クイズの1問=1件の差分（diff）、正解=approve、不正解=changes requested。
@@ -32,6 +35,9 @@ class AppPalette {
   // 空欄（未回答の差分行）のマーカー色。
   static const pending = Color(0xFFB8791E);
   static const pendingSoft = Color(0xFFFBF0DE);
+
+  // 文章中に埋め込まれた識別子・コード片の色。地の文から浮き上がらせる。
+  static const inlineCode = Color(0xFFC1432B);
 }
 
 /// 見出し・ボタン・UIラベル用。幾何学的でテクニカルな印象のゴシック。
@@ -169,26 +175,6 @@ class DiffCard extends StatelessWidget {
   }
 }
 
-/// diffの1行分の増減を表す小さなバッジ。例: +1 -1
-class DiffStatBadge extends StatelessWidget {
-  const DiffStatBadge({super.key, required this.added, required this.removed});
-
-  final int added;
-  final int removed;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text('+$added', style: appMono(11.5, color: AppPalette.add, weight: FontWeight.w700)),
-        const SizedBox(width: 6),
-        Text('-$removed', style: appMono(11.5, color: AppPalette.remove, weight: FontWeight.w700)),
-      ],
-    );
-  }
-}
-
 /// diff風コードブロック。空欄行（"____" を含む行）だけをハイライトする。
 class DiffCodeBlock extends StatelessWidget {
   const DiffCodeBlock({super.key, required this.code, this.revealColor});
@@ -224,10 +210,13 @@ class _CodeLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 構文に応じた色分けは全行に適用する。空欄行の強調は、背景と左のマーカーで行う。
+    final code = Text.rich(highlightLine(text, baseStyle: appMono(13, color: AppPalette.codeText)));
+
     if (!isBlank) {
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-        child: Text(text, style: appMono(13, color: AppPalette.codeMuted)),
+        child: code,
       );
     }
     final markColor = revealColor ?? AppPalette.pending;
@@ -238,9 +227,136 @@ class _CodeLine extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(width: 3, height: 18, color: markColor, margin: const EdgeInsets.only(top: 1, right: 10)),
-          Expanded(child: Text(text, style: appMono(13, color: AppPalette.codeText, weight: FontWeight.w600))),
+          Expanded(child: code),
         ],
       ),
     );
+  }
+}
+
+final _inlinePattern = RegExp(r'(?<blank>\[BLANK\]|_{3,})|`(?<code>[^`]+)`');
+
+/// 文章中の記法を装飾したスパン列を組み立てる。
+///
+/// - バッククォート … 識別子やコード片なので、地の文と区別できる色の等幅にする。
+///   バッククォート自体は表示しない。
+/// - `[BLANK]` / `____` … コード側の空欄マーカーと同じ色のチップにする（`markBlanks` 時のみ）。
+///   以前は問題文が `[BLANK]`、コードが `____` と別表記だったため、
+///   「どの穴のことか」を読み手が毎回対応付ける必要があった。色を揃えて解消する。
+List<InlineSpan> appInlineSpans(
+  String text, {
+  required double baseFontSize,
+  Color? blankColor,
+  bool markBlanks = false,
+}) {
+  final color = blankColor ?? AppPalette.pending;
+  final spans = <InlineSpan>[];
+  var index = 0;
+
+  for (final match in _inlinePattern.allMatches(text)) {
+    final code = match.namedGroup('code');
+    if (code == null && !markBlanks) continue;
+
+    if (match.start > index) {
+      spans.add(TextSpan(text: text.substring(index, match.start)));
+    }
+
+    if (code != null) {
+      spans.add(
+        TextSpan(
+          text: code,
+          style: appMono(baseFontSize * 0.88, color: AppPalette.inlineCode, weight: FontWeight.w700),
+        ),
+      );
+    } else {
+      spans.add(
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 3),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.16),
+              border: Border(bottom: BorderSide(color: color, width: 2)),
+            ),
+            child: Text('？', style: appMono(13, color: color, weight: FontWeight.w700)),
+          ),
+        ),
+      );
+    }
+    index = match.end;
+  }
+  if (index < text.length) spans.add(TextSpan(text: text.substring(index)));
+  return spans;
+}
+
+/// 外部サイトを新しいタブで開くリンク。
+/// 外部へ出ることが分かるようにアイコンを添える。
+class AppLink extends StatelessWidget {
+  const AppLink({super.key, required this.label, required this.url, this.style});
+
+  final String label;
+  final String url;
+  final TextStyle? style;
+
+  @override
+  Widget build(BuildContext context) {
+    final textStyle = (style ?? appMono(12, weight: FontWeight.w700)).copyWith(
+      color: AppPalette.accent,
+      decoration: TextDecoration.underline,
+      decorationColor: AppPalette.accent,
+    );
+
+    return InkWell(
+      onTap: () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(child: Text(label, style: textStyle)),
+          const SizedBox(width: 4),
+          const Icon(Icons.open_in_new, size: 13, color: AppPalette.accent),
+        ],
+      ),
+    );
+  }
+}
+
+/// バッククォート部分を色付きの等幅で見せる本文テキスト。
+/// 画面をまたいで同じ見え方にするため、地の文はすべてこれを通す。
+class AppText extends StatelessWidget {
+  const AppText(
+    this.text, {
+    super.key,
+    required this.style,
+    this.markBlanks = false,
+    this.blankColor,
+    this.selectable = false,
+    this.maxLines,
+    this.overflow,
+  });
+
+  final String text;
+  final TextStyle style;
+
+  /// 問題文だけは `[BLANK]` を空欄チップとして描く。
+  final bool markBlanks;
+  final Color? blankColor;
+  final bool selectable;
+  final int? maxLines;
+  final TextOverflow? overflow;
+
+  @override
+  Widget build(BuildContext context) {
+    final span = TextSpan(
+      style: style,
+      children: appInlineSpans(
+        text,
+        baseFontSize: style.fontSize ?? 14,
+        blankColor: blankColor,
+        markBlanks: markBlanks,
+      ),
+    );
+    if (selectable) return SelectableText.rich(span, maxLines: maxLines);
+    return Text.rich(span, maxLines: maxLines, overflow: overflow);
   }
 }

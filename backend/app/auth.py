@@ -4,10 +4,8 @@
 壊さないため、クイズ生成では optional_user を使い、Authorization ヘッダがなければ
 黙って None を返す。ログインが前提の機能だけが require_user を使う。
 
-以前は Firebase Authentication（GitHub SSO）を使っていたが、通常のメールアドレス+
-パスワード認証に切り替えた。本人確認の方式が変わるだけで、GitHubリポジトリへの
-アクセスは元々これとは別（ユーザーが設定画面で入力するPersonal Access Token）だった
-ため、そちら側への影響はない。
+本人確認はメールアドレス + パスワードで行う。GitHubリポジトリへのアクセスは
+これとは別で、ユーザーが設定画面で入力する Personal Access Token を使う。
 """
 
 import logging

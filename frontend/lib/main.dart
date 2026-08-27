@@ -15,6 +15,8 @@ class RepoEducatorApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Repo Educator',
+      // 右上のDEBUGリボンを出さない（デバッグビルドでも見た目を本番と揃える）。
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorSchemeSeed: AppPalette.accent,
         scaffoldBackgroundColor: AppPalette.bg,

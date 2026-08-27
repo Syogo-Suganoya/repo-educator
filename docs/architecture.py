@@ -9,12 +9,12 @@ README.md「2. システムアーキテクチャ」の構成を diagrams で図�
 """
 
 from diagrams import Cluster, Diagram, Edge
-from diagrams.firebase.develop import Authentication, Hosting
+from diagrams.firebase.develop import Hosting
 from diagrams.gcp.compute import Run
-from diagrams.gcp.database import Firestore
-from diagrams.gcp.ml import VertexAI
+from diagrams.gcp.ml import AIPlatform
 from diagrams.gcp.security import SecretManager
 from diagrams.onprem.client import Users
+from diagrams.onprem.database import PostgreSQL
 from diagrams.onprem.vcs import Github
 from diagrams.programming.framework import Flutter
 
@@ -36,32 +36,30 @@ with Diagram(
     graph_attr=GRAPH_ATTR,
 ):
     users = Users("ユーザー")
+    hosting = Hosting("静的ホスティング")
+    frontend = Flutter("Flutter Web\nクイズ / ドキュメント / 質問")
 
-    with Cluster("Firebase"):
-        hosting = Hosting("Firebase Hosting")
-        frontend = Flutter("Flutter Web\n(クイズUI / 履歴)")
-        auth = Authentication("Authentication\n(サインイン)")
-        firestore = Firestore("Cloud Firestore\nクイズキャッシュ / 学習進捗")
+    with Cluster("Google Cloud"):
+        backend = Run("Cloud Run\nPython / FastAPI\nJWT認証・解析API")
+        secret = SecretManager(
+            "Secret Manager\nGITHUB_TOKEN\nGEMINI_API_KEY\nJWT_SECRET"
+        )
 
-        hosting >> Edge(label="配信") >> frontend
-        frontend >> Edge(label="(2) 認証") >> auth
-        frontend >> Edge(label="進捗同期") >> firestore
-
-    with Cluster("Google Cloud（ログイン機能用。GEMINI_API_KEYのみの場合は不要）"):
-        backend = Run("Cloud Run\nPython / FastAPI\nPOST /api/v1/quiz/generate")
-        secret = SecretManager("Secret Manager\nGITHUB_TOKEN\nGEMINI_API_KEY")
-
-        backend >> Edge(label="PAT参照", style="dotted") >> secret
-        backend >> Edge(label="キャッシュ読み書き", style="dashed") >> firestore
-
-    # Vertex AIではなく、APIキー1本のGemini Developer APIを使う。
-    # GCPプロジェクトとは無関係な別サービスであることを示すため、Google Cloudクラスタの外に置く。
-    gemini = VertexAI("Gemini Developer API\ngemini-3.5-flash\nAPIキー認証・Structured Outputs")
-    backend >> Edge(label="(4) プロンプト構築") >> gemini
-    gemini >> Edge(label="(5) 構造化JSON", style="dashed") >> backend
-
+    # ログイン・学習履歴・解析結果キャッシュの保存先。
+    # Neon等のマネージドPostgresでも自前ホストでも、接続文字列を変えるだけで動く。
+    db = PostgreSQL("PostgreSQL\nユーザー / 学習履歴\n解析結果キャッシュ")
+    gemini = AIPlatform(
+        "Gemini Developer API\ngemini-3.5-flash\nAPIキー認証・Structured Outputs"
+    )
     github = Github("GitHub API\nソースコード取得")
 
+    # ラベルが意図した線に沿うよう、ノードを出し切ってからエッジをまとめて引く。
     users >> Edge(label="(1) リポジトリURL入力 / 回答") >> hosting
-    frontend >> Edge(label="HTTPS / JSON") >> backend
+    hosting >> Edge(label="配信") >> frontend
+    frontend >> Edge(label="(2) HTTPS / JSON") >> backend
+
+    backend >> Edge(label="シークレット参照", style="dotted") >> secret
     backend >> Edge(label="(3) リポジトリ取得") >> github
+    backend >> Edge(label="(4) プロンプト構築") >> gemini
+    gemini >> Edge(label="(5) 構造化JSON", style="dashed") >> backend
+    backend >> Edge(label="キャッシュ / 履歴の読み書き", style="dashed") >> db

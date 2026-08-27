@@ -15,11 +15,15 @@ class AccountButton extends StatefulWidget {
     required this.authService,
     required this.apiClient,
     this.onChanged,
+    this.onShowPatGuide,
   });
 
   final AuthService authService;
   final ApiClient apiClient;
   final VoidCallback? onChanged;
+
+  /// トークン入力ダイアログから、トップページのPAT取得手順へ案内する。
+  final VoidCallback? onShowPatGuide;
 
   @override
   State<AccountButton> createState() => _AccountButtonState();
@@ -63,6 +67,7 @@ class _AccountButtonState extends State<AccountButton> {
       context,
       apiClient: widget.apiClient,
       account: _account,
+      onShowPatGuide: widget.onShowPatGuide,
     );
     if (updated != null && mounted) setState(() => _account = updated);
   }

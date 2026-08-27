@@ -11,9 +11,8 @@ class Settings(BaseSettings):
     # ログイン後に本人が入力してDBに暗号化保存する（store.save_github_user_token）。
     github_token: str = ""
 
-    # --- Gemini（Gemini Developer API。APIキー1本で使う。Vertex AI は使わない） ---
+    # --- Gemini（Gemini Developer API。APIキー1本で使う） ---
     #
-    # GCPプロジェクト・IAMを経由するVertex AI ではなく、単体のAPIキーで
     # ai.google.dev のGemini Developer APIを直接呼ぶ。DB等とは
     # 完全に独立しており、DATABASE_URL が空でもGeminiだけは動く。
     gemini_api_key: str = ""
@@ -41,7 +40,7 @@ class Settings(BaseSettings):
     #   Neon    : postgresql+asyncpg://user:pass@ep-xxxx.neon.tech/dbname?ssl=require
     database_url: str = ""
 
-    # --- 認証（自前実装。Firebase/GCPには依存しない） ---
+    # --- 認証（メールアドレス + パスワード / JWT） ---
     #
     # JWTの署名鍵。空だと認証機能自体が無効になる（公開リポジトリの利用は継続できる）。
     jwt_secret: str = ""

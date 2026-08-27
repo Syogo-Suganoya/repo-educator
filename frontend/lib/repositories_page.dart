@@ -186,8 +186,8 @@ class _PrivacyNotice extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              'クイズ生成のため、選んだリポジトリのソースコードの一部が Google Cloud の '
-              'Vertex AI に送信されます。業務のコードを扱う場合は、社内の取り扱い規程をご確認ください。',
+              'クイズ生成のため、選んだリポジトリのソースコードの一部が Google の '
+              'Gemini に送信されます。業務のコードを扱う場合は、社内の取り扱い規程をご確認ください。',
               style: appBody(13, color: AppPalette.ink, height: 1.7),
             ),
           ),

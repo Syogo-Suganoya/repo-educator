@@ -4,7 +4,6 @@ uvicorn[standard]==0.30.6
 httpx==0.28.1
 pydantic==2.9.2
 pydantic-settings==2.5.2
-# 旧 google-cloud-aiplatform の vertexai.generative_models は 2026-06-24 に削除済み。
 # 新しいGeminiモデルは google-genai からのみ利用できる。
 google-genai==1.47.0
 

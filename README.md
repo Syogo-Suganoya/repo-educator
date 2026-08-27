@@ -12,8 +12,8 @@
 
 ### 1.1 開発要件への適合
 * **Google Cloud アプリケーション実行プロダクト**: **Cloud Run** を採用（コンテナベースの柔軟性とリクエスト課金によるコスト最適化）。
-* **AI技術**: **Gemini**（既定 `gemini-3.5-flash`）を採用。広大なコンテキストウィンドウを活かし、複数ファイルを丸ごと解析する。呼び出しは **Gemini Developer API（APIキー1本）** で行い、Vertex AI（GCPプロジェクト・IAM経由）は使わない。AIの利用に GCP プロジェクトを必要としない構成にしている（詳細は 2.2 参照）。
-* **その他の技術（任意）**: フロントエンドに **Flutter (Web)**。ログイン機能・データ永続化は自前実装（**FastAPI + JWT + PostgreSQL**）で、GCPやFirebaseには依存しない。DBは Docker Compose のローカルコンテナでも Neon 等のマネージドPostgresでも、接続文字列を変えるだけで動く。
+* **AI技術**: **Gemini**（既定 `gemini-3.5-flash`）を採用。広大なコンテキストウィンドウを活かし、複数ファイルを丸ごと解析する。呼び出しは **Gemini Developer API（APIキー1本）** で行い、AIの利用に GCP プロジェクトを必要としない構成にしている（詳細は 2.2 参照）。
+* **その他の技術（任意）**: フロントエンドに **Flutter (Web)**。ログイン機能・データ永続化は **FastAPI + JWT + PostgreSQL** で実装する。DBは Docker Compose のローカルコンテナでも Neon 等のマネージドPostgresでも、接続文字列を変えるだけで動く。
 
 ---
 
@@ -46,13 +46,13 @@
    * GitHub API等を利用して指定されたリポジトリの主要なソースコード（`.py`, `.js`, `.go`など）をダウンロード・結合。
    * Gemini Developer API 経由でGeminiモデルを呼び出し、構造化データ（JSON）としてクイズとドキュメントを取得・パース。
    * **クイズ生成とドキュメント生成は、取得済みソースを使い回して並行実行する**（`asyncio.gather`）。1回の呼び出しに両方を詰め込むと出力トークン上限でJSONが途中で切れやすいため、あえて別呼び出しにしている。
-3. **認証・DB（自前実装。GCP/Firebaseには依存しない）**:
+3. **認証・DB（FastAPI + JWT + PostgreSQL）**:
    * **認証**: メールアドレス + パスワード（bcryptでハッシュ化）。ログイン成功時にJWTを発行し、フロントエンドは `Authorization: Bearer <JWT>` として送る。
    * **DB（PostgreSQL）**: ユーザー、暗号化したGitHubトークン、学習履歴、解析結果キャッシュ、ブランチ更新確認用のポインタを保存。SQLAlchemy(async) + asyncpg 経由。ローカル開発はDocker Composeのpostgresコンテナ、本番はNeon等のマネージドPostgresを想定（接続文字列を差し替えるだけ）。
 4. **AI Engine (Gemini)**:
    * 既定では `gemini-3.5-flash` を使用（環境変数 `GEMINI_MODEL` で差し替え可能）。Structured Outputs（スキーマ定義によるJSON強制出力）を利用し、アプリケーション側でパースしやすい形式でクイズとドキュメントを生成。
    * SDKは **`google-genai`**。接続処理は `backend/app/gemini.py` に集約している（後述）。
-   * **Vertex AI は使わない。** `genai.Client(api_key=...)` で ai.google.dev のGemini Developer APIを直接呼ぶ、APIキー1本の方式。DBや認証の設定とは完全に独立しており、それらが空でもGeminiだけは動く。
+   * `genai.Client(api_key=...)` で ai.google.dev のGemini Developer APIを直接呼ぶ、APIキー1本の方式。DBや認証の設定とは完全に独立しており、それらが空でもGeminiだけは動く。
 
 ---
 
@@ -67,7 +67,7 @@
 | メールアドレス + パスワード認証（自前実装） | **本人確認** | ユーザーID、JWT |
 | ユーザーが設定画面で入力する Personal Access Token | **リポジトリへのアクセス権** | 本人が発行したPAT |
 
-**GitHub SSO は採用していない。** 本人確認は通常のID/パスワード認証（`backend/app/auth.py`）で行い、GitHubログインには依存しない。プライベートリポジトリへのアクセスは、これとは別にユーザー自身が GitHub で発行した PAT を、アプリの設定画面に直接入力する方式にしている。サーバ側の環境変数として焼き込むトークンとは別物で、**1ユーザーにつき1本、本人しか持たない**。
+本人確認はメールアドレス + パスワード認証（`backend/app/auth.py`）で行う。プライベートリポジトリへのアクセスは、これとは別にユーザー自身が GitHub で発行した PAT を、アプリの設定画面に直接入力する方式にしている。サーバ側の環境変数として焼き込むトークンとは別物で、**1ユーザーにつき1本、本人しか持たない**。
 
 ### 認証フロー
 
@@ -365,29 +365,15 @@ Structured Outputs で強制する出力スキーマは、`quizzes` を要素と
 
 実装は `backend/app/quiz_generator.py` を参照。
 
-### 5.4 SDKと接続方式の選定
+### 5.4 SDKと接続方式
 
-**SDKは `google-genai` を使う。** 旧 `vertexai.generative_models`（`google-cloud-aiplatform` に含まれる）は2025年6月24日に非推奨化され、**2026年6月24日に削除された**。新しいGeminiモデルは `google-genai` からしか利用できない。
-
-**接続方式は Vertex AI ではなく Gemini Developer API（APIキー1本）を選んでいる。**
-
-| | Gemini Developer API（採用） | Vertex AI |
-|---|---|---|
-| 認証 | `GEMINI_API_KEY` 1本 | GCPプロジェクト + IAM（サービスアカウント） |
-| GCPプロジェクトの要否 | 不要 | 必須 |
-| 向き | Gemini単体をシンプルに使う | 他のGCPサービスと権限・課金をまとめたい場合 |
-
-このプロジェクトでは PostgreSQL や JWT はログイン機能のためだけに使っており、**AIの利用自体はそれらと切り離せる**。`GEMINI_API_KEY` さえあれば、DBもGCPプロジェクトもなしでクイズ・ドキュメント生成が動く（ログイン機能を使わないなら `DATABASE_URL` / `JWT_SECRET` は一切不要）。
-
-`google-genai` の SDK は同じでも、初期化方法が異なる。
+**SDKは `google-genai`、接続は Gemini Developer API（APIキー1本）。**
 
 ```python
-# 採用: Gemini Developer API
 genai.Client(api_key=settings.gemini_api_key)
-
-# 不採用: Vertex AI
-genai.Client(vertexai=True, project=..., location=...)
 ```
+
+PostgreSQL や JWT はログイン機能のためだけに使っており、**AIの利用自体はそれらと切り離せる**。`GEMINI_API_KEY` さえあれば、DBもGCPプロジェクトもなしでクイズ・ドキュメント生成が動く（ログイン機能を使わないなら `DATABASE_URL` / `JWT_SECRET` は一切不要）。
 
 接続処理は `backend/app/gemini.py` の `generate_json()` に集約している。クイズ生成とドキュメント生成の両方がここを経由するため、SDKや接続方式の差し替えはこの1ファイルで完結する。
 
@@ -418,11 +404,11 @@ Geminiのモデルは定期的に廃止される。実際に次のことが起�
 
 
 3. **Geminiの認証情報の扱い**:
-* `GEMINI_API_KEY` は他のシークレットと同様、環境変数へ直書きせず Secret Manager 経由で Cloud Run に注入する。GCPのIAMロールとは無関係（Vertex AIを使っていないため `roles/aiplatform.user` は不要）。
+* `GEMINI_API_KEY` は他のシークレットと同様、環境変数へ直書きせず Secret Manager 経由で Cloud Run に注入する。GCPのIAMロールとは無関係で、AI用の権限付与は不要。
 
 
 4. **認証情報の管理**（ログイン機能を使う場合）:
-* `DATABASE_URL` / `JWT_SECRET` / `ENCRYPTION_KEY` は他のシークレットと同様、環境変数へ直書きせず Secret Manager 等の秘密管理サービス経由で注入する。GCPのIAMロールとは無関係（自前実装のためGCP固有の権限は一切不要）。
+* `DATABASE_URL` / `JWT_SECRET` / `ENCRYPTION_KEY` は他のシークレットと同様、環境変数へ直書きせず Secret Manager 等の秘密管理サービス経由で注入する。GCP固有の権限は不要。
 * `JWT_SECRET` は複数インスタンスで同じ値を共有する必要がある（インスタンスごとに異なると、あるインスタンスで発行したJWTが他のインスタンスで検証できない）。
 
 

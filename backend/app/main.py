@@ -5,7 +5,7 @@ import time
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import analysis_cache, store
+from app import analysis_cache, qa, store
 from app.analysis_cache import AnalysisResult
 from app.auth import (
     AuthUser,
@@ -31,12 +31,15 @@ from app.github_client import (
     verify_user_token,
 )
 from app.doc_generator import generate_docs
+from app.gemini import GeminiError, GeminiQuotaExceededError
 from app.quiz_generator import generate_quizzes
 from app.sample_docs import get_sample_docs
 from app.sample_quizzes import get_sample_sections
 from app.schemas import (
     AnswerRequest,
     AuthResponse,
+    DocAnswerResponse,
+    DocQuestionRequest,
     GithubTokenStatusResponse,
     LoginRequest,
     MeResponse,
@@ -85,15 +88,18 @@ async def generate_quiz(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    if not settings.gemini_configured:
-        sample_sections = get_sample_sections(owner, repo)
-        if sample_sections is not None:
-            return QuizGenerateResponse(
-                repository_id=f"{owner}_{repo}_{request.branch}",
-                url=request.repository_url,
-                sections=sample_sections,
-                docs=get_sample_docs(owner, repo) or [],
-            )
+    # サンプルリポジトリは実コードを元に用意したキュレーション済みデータを即座に返す。
+    # 「すぐ試せる」ことが目的なので、Geminiの設定有無に関わらずここで打ち切り、
+    # GitHubの取得もGeminiの生成も走らせない。
+    # 出題リクエストがある場合だけは、キュレーション済みデータでは応えられないので生成に回す。
+    sample_sections = None if request.focus else get_sample_sections(owner, repo)
+    if sample_sections is not None:
+        return QuizGenerateResponse(
+            repository_id=f"{owner}_{repo}_{request.branch}",
+            url=request.repository_url,
+            sections=sample_sections,
+            docs=get_sample_docs(owner, repo) or [],
+        )
 
     # ログイン済みなら、本人が設定画面で保存したPATを使う（サーバ共有の環境変数とは別物）。
     user_token: str | None = None
@@ -118,7 +124,8 @@ async def generate_quiz(
     cached = await _lookup_cache(owner, repo, ref.commit_sha, key)
     if cached is not None:
         _ensure_can_read(cached, caller_has_access=caller_has_access)
-        sections = cached.sections_for(request.num_questions)
+        # 出題リクエストがあるときは、観点が違うので既存の結果を使い回さない。
+        sections = None if request.focus else cached.sections_for(request.num_questions)
         if sections is not None:
             return QuizGenerateResponse(
                 repository_id=repository_id,
@@ -139,16 +146,35 @@ async def generate_quiz(
             num_questions=request.num_questions,
             focus_language=request.focus_language,
             known=cached,
+            focus=request.focus,
         )
 
+    # リクエスト文まで含めて初めて「同じ処理」と言えるので、合流のキーにも含める。
+    inflight_key = f"{key}:{request.num_questions}:{request.focus or ''}"
     try:
-        result = await analysis_cache.run_once(f"{key}:{request.num_questions}", build)
+        result = await analysis_cache.run_once(inflight_key, build)
     except RepositoryNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except RepositoryAccessDeniedError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
     except RateLimitedError as e:
         raise HTTPException(status_code=429, detail=_rate_limit_message(e)) from e
+    except GeminiQuotaExceededError as e:
+        # 待っても短時間では回復しないので、混雑（503）とは案内を分ける。
+        logger.warning("Gemini quota exceeded: %s", e)
+        raise HTTPException(
+            status_code=429,
+            detail="AIの利用上限に達しました。無料枠は1日あたりの回数制限があるため、"
+            "枠が回復するまでお待ちいただくか、APIキーのプランをご確認ください。",
+        ) from e
+    except GeminiError as e:
+        # 生成の失敗はサーバのバグではなく、AI側の一時的な事情であることが多い。
+        # 500のまま返すと利用者には原因も再試行の可否も分からないため、503にする。
+        logger.warning("Gemini generation failed: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="AIによる生成に失敗しました。時間をおいて、もう一度お試しください。",
+        ) from e
 
     # 生成を待っている間に権限が変わっている可能性もあるので、返す直前にも確認する。
     _ensure_can_read(result, caller_has_access=caller_has_access)
@@ -160,6 +186,57 @@ async def generate_quiz(
         docs=result.docs,
         cached=False,
     )
+
+
+@app.post("/api/v1/docs/ask", response_model=DocAnswerResponse)
+async def ask_about_repository(
+    request: DocQuestionRequest,
+    user: AuthUser | None = Depends(optional_user),
+) -> DocAnswerResponse:
+    """リポジトリについての質問に、実際のソースコードを根拠に答える。
+
+    クイズ生成と違い、質問は毎回異なるためキャッシュしない。
+    アクセス権の判定はクイズ側と同じ厳しさを保つ（回答にコードが引用されるため）。
+    """
+    try:
+        owner, repo = parse_repository_url(request.repository_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    user_token: str | None = None
+    if user is not None:
+        user_token = await store.load_github_user_token(user.uid)
+
+    try:
+        ref = await _resolve_ref(owner, repo, request.branch, user_token)
+        if ref.private and user_token is None:
+            raise HTTPException(
+                status_code=403,
+                detail="You no longer have access to this repository",
+            )
+        files = await fetch_repository_files(ref, request.branch, user_token)
+        answer, file_paths = await qa.answer_question(files, request.question)
+    except RepositoryNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RepositoryAccessDeniedError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except RateLimitedError as e:
+        raise HTTPException(status_code=429, detail=_rate_limit_message(e)) from e
+    except GeminiQuotaExceededError as e:
+        logger.warning("Gemini quota exceeded: %s", e)
+        raise HTTPException(
+            status_code=429,
+            detail="AIの利用上限に達しました。無料枠は1日あたりの回数制限があるため、"
+            "枠が回復するまでお待ちいただくか、APIキーのプランをご確認ください。",
+        ) from e
+    except GeminiError as e:
+        logger.warning("Gemini answer failed: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="AIによる回答に失敗しました。時間をおいて、もう一度お試しください。",
+        ) from e
+
+    return DocAnswerResponse(answer=answer, file_paths=file_paths)
 
 
 def _rate_limit_message(error: RateLimitedError) -> str:
@@ -249,23 +326,29 @@ async def _analyze(
     num_questions: int,
     focus_language: str | None,
     known: AnalysisResult | None,
+    focus: str | None = None,
 ) -> AnalysisResult:
     """不足している分だけを生成し、キャッシュに書き戻す。
 
     ドキュメントは出題数に依存しないため、既にキャッシュがあれば再生成しない。
     「同じリポジトリを別の出題数で開いただけ」でドキュメントまで作り直すのを避ける。
+
+    出題リクエスト（focus）付きの結果はその人の指示に固有なので、
+    共有キャッシュには保存しない。保存すると、指示していない別の利用者が
+    その観点に偏ったクイズを受け取ってしまう。
     """
     files = await fetch_repository_files(ref, branch, token)
 
-    needs_docs = known is None or not known.docs
+    # 出題リクエストは出題内容だけを変えるもので、ドキュメントには影響しない。
+    needs_docs = not focus and (known is None or not known.docs)
     if needs_docs:
         sections, docs = await asyncio.gather(
-            generate_quizzes(files, num_questions, focus_language),
+            generate_quizzes(files, num_questions, focus_language, focus),
             generate_docs(files, focus_language),
         )
     else:
-        sections = await generate_quizzes(files, num_questions, focus_language)
-        docs = known.docs
+        sections = await generate_quizzes(files, num_questions, focus_language, focus)
+        docs = known.docs if known else []
 
     result = AnalysisResult(
         private=ref.private,
@@ -275,6 +358,9 @@ async def _analyze(
             num_questions: sections,
         },
     )
+
+    if focus:
+        return result
 
     key = analysis_cache.cache_key(ref.owner, ref.repo, ref.commit_sha)
     analysis_cache.memory_put(key, result)
