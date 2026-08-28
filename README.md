@@ -5,10 +5,10 @@
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
-![Gemini](https://img.shields.io/badge/Gemini-3.5%20Flash-8E75B2?logo=googlegemini&logoColor=white)
-![Cloud Run](https://img.shields.io/badge/Cloud%20Run-4285F4?logo=googlecloud&logoColor=white)
+![Gemini](https://img.shields.io/badge/Gemini-3.5_Flash-8E75B2?logo=googlegemini&logoColor=white)
+![Cloud Run](https://img.shields.io/badge/Cloud_Run-4285F4?logo=googlecloud&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
-![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?logo=githubactions&logoColor=white)
 
 ## 1. システム概要
 本システムは、ユーザーが指定したGitHubリポジトリ（またはソースコード群）を自動で解析し、そのコードの重要な概念、アルゴリズム、アーキテクチャ、言語仕様に関する **「穴埋めクイズ」** と **「逆引きドキュメント」** を自動生成する学習支援プラットフォームである。
@@ -19,6 +19,54 @@
 |---|---|---|
 | **穴埋めクイズ** | コードを読む力を鍛える | 腰を据えて理解を深めたいとき |
 | **逆引きドキュメント** | 知りたいことに最短でたどり着く | 「この機能はどこ？」を今すぐ知りたいとき |
+
+### 1.1 使い方
+
+公開URL: https://repo-educator.web.app/
+
+#### 1. リポジトリのURLを渡す
+
+入力欄にGitHubのリポジトリURLを貼って送信する。パブリックリポジトリはログイン不要でそのまま解析できる。
+
+![トップページ](docs/screenshots/top.png)
+
+自分のリポジトリがなくても、実コードから作ったサンプルをカードから直接開ける。
+
+| psf/requests | TheAlgorithms/Python | gin-gonic/gin |
+|---|---|---|
+| ![psf/requestsのサンプル](docs/screenshots/sample-requests.png) | ![TheAlgorithms/Pythonのサンプル](docs/screenshots/sample-algorithms.png) | ![gin-gonic/ginのサンプル](docs/screenshots/sample-gin.png) |
+
+#### 2. クイズを解く
+
+左に問題文と実際のコード、右に4択が並ぶ。コードの一部が `？` に置き換えられており、そこに入るものを選ぶ。
+
+![クイズ画面](docs/screenshots/quiz.png)
+
+回答すると正誤の判定と解説が出る。解説は「なぜそれが正解なのか」を設計意図まで含めて述べる。
+
+| 正解のとき | 間違えたとき |
+|---|---|
+| ![正解時の解説](docs/screenshots/answer-correct.png) | ![不正解時の解説](docs/screenshots/answer-wrong.png) |
+
+#### 3. 逆引きドキュメントで引く
+
+「この機能はどこに書いてあるか」を今すぐ知りたいときは、逆引きドキュメントを使う。機能名・関数名・やりたいこと・ファイル名の4つの粒度で索引が作られており、検索は取得済みのJSONに対してクライアント側で行うためサーバー往復が発生しない。
+
+![逆引きドキュメント](docs/screenshots/docs-search.png)
+
+#### 4. プライベートリポジトリを解析する（任意）
+
+ログインしてPersonal Access Token（PAT）を登録すると、自分のプライベートリポジトリを解析できる。トークンは暗号化して保存され、複数登録した場合はどのトークンでどのリポジトリを読むかを自動で判別する。詳細は「2.3 認証とリポジトリアクセス」を参照。
+
+![PAT登録ダイアログ](docs/screenshots/pat-dialog.png)
+
+ログインの有無で使える機能は次のとおり。
+
+| | 未ログイン | ログイン後 |
+|---|---|---|
+| パブリックリポジトリの解析 | ○ | ○ |
+| 学習履歴の保存 | − | ○ |
+| プライベートリポジトリの解析 | − | ○（PAT登録が必要） |
 
 ---
 
