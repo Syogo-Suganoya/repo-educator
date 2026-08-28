@@ -71,9 +71,27 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    await init_models()
+    """DBの初期化に失敗しても起動は続ける。
+
+    ここで例外を投げるとプロセスが落ち、Cloud Run では
+    「ポートで待ち受けない」＝デプロイ失敗として扱われる。
+    DBはログイン機能・履歴・キャッシュのためのもので、公開リポジトリの
+    クイズ生成には不要なので、落とすより縮退して動かすほうがよい。
+    """
+    try:
+        await init_models()
+    except Exception as e:
+        logger.error(
+            "Database initialization failed (%s). "
+            "Login, history and persistent cache are disabled for now.",
+            type(e).__name__,
+        )
 
 
+# 死活監視。Cloud Run は `/healthz` をインフラ側で横取りし、コンテナまで
+# 届かない（Googleの404が返る）。CDの起動確認に使えないため、実体は
+# `/api/v1/health` に置き、`/healthz` はローカル用の別名として残す。
+@app.get("/api/v1/health")
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -114,8 +132,8 @@ async def generate_quiz(
             docs=get_sample_docs(owner, repo) or [],
         )
 
-    # ログイン済みなら、本人が登録したPATのうちこのリポジトリを読めるものを使う
-    # （サーバ共有の環境変数とは別物）。
+    # ログイン済みなら、本人が登録したPATのうちこのリポジトリを読めるものを使う。
+    # 未ログインなら token=None のまま、未認証で公開リポジトリだけを扱う。
     try:
         user_token, repo_meta = await _resolve_user_token(user, owner, repo, request.branch)
     except RateLimitedError as e:

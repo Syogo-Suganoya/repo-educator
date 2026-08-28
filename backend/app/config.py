@@ -5,12 +5,6 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # --- GitHub（未ログイン時の公開リポジトリ取得に使うサーバ共有PAT） ---
-    #
-    # これはユーザー個別のトークンとは別物。ユーザー自身のPATは環境変数には置かず、
-    # ログイン後に本人が入力してDBに暗号化保存する（store.save_github_user_token）。
-    github_token: str = ""
-
     # --- Gemini（Gemini Developer API。APIキー1本で使う） ---
     #
     # ai.google.dev のGemini Developer APIを直接呼ぶ。DB等とは
@@ -38,7 +32,45 @@ class Settings(BaseSettings):
     # 例:
     #   ローカル: postgresql+asyncpg://repo_educator:repo_educator@db:5432/repo_educator
     #   Neon    : postgresql+asyncpg://user:pass@ep-xxxx.neon.tech/dbname?ssl=require
-    database_url: str = ""
+    #
+    # 参照は database_url プロパティ経由で行う。マネージドサービスが配る生の
+    # 接続文字列をそのまま入れても動くよう、非同期ドライバ向けに正規化するため。
+    database_url_raw: str = Field(default="", alias="DATABASE_URL")
+
+    @property
+    def database_url(self) -> str:
+        """非同期ドライバ（asyncpg）で使える形に整えた接続文字列を返す。
+
+        Neon等が配るのは `postgresql://...?sslmode=require` という同期ドライバ向けの
+        形式で、そのまま渡すとSQLAlchemyがpsycopg2を選び、未インストールで起動に失敗する。
+        本番で気づきにくい割に直し方が一意なので、ここで吸収する。
+        """
+        url = self.database_url_raw.strip()
+        if not url:
+            return ""
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://") :]
+        if url.startswith("postgresql://"):
+            url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+
+        base, _, query = url.partition("?")
+        if not query:
+            return url
+
+        # asyncpg は psycopg2 向けのクエリを解さない。
+        #   sslmode        → 等価な ssl に読み替える
+        #   channel_binding → asyncpg に無い項目なので落とす（Neonの文字列に付いてくる）
+        kept = []
+        for part in query.split("&"):
+            if not part:
+                continue
+            key, sep, value = part.partition("=")
+            if key == "channel_binding":
+                continue
+            if key == "sslmode":
+                key = "ssl"
+            kept.append(f"{key}{sep}{value}")
+        return f"{base}?{'&'.join(kept)}" if kept else base
 
     # --- 認証（メールアドレス + パスワード / JWT） ---
     #

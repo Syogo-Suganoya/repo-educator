@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase Hosting
+# デプロイ済みファイルのハッシュを持つローカルキャッシュ。環境ごとに変わるため共有しない。
+.firebase/

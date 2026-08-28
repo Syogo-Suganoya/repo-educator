@@ -233,9 +233,9 @@ class TestErrorClassification:
         with pytest.raises(RateLimitedError):
             self._check(403, remaining="0", repo_accessible=True)
 
-    def test_shared_server_token_does_not_count_as_caller_access(self):
-        # レートリミット緩和用のサーバ共有トークンでAuthorizationが付いていても、
-        # 利用者本人の権限ではないため、PAT登録へ誘導する側に倒すこと。
+    def test_unauthenticated_caller_is_guided_to_register_a_pat(self):
+        # 利用者本人のトークンがなければ、404は「存在しない」ではなく
+        # 「あなたの権限では読めない」として扱い、PAT登録へ誘導すること。
         with pytest.raises(RepositoryAccessDeniedError):
             self._check(404, authenticated=False)
 

@@ -11,8 +11,8 @@ name: Deploy
 #   secrets.GCP_RUNTIME_SERVICE_ACCOUNT    … Cloud Runの実行時サービスアカウント
 #   vars.GCP_PROJECT_ID / vars.FRONTEND_ORIGIN
 #
-# Secret Manager 側には gemini-api-key / github-token / database-url /
-# jwt-secret / encryption-key を用意しておく。
+# Secret Manager 側には gemini-api-key / database-url / jwt-secret /
+# encryption-key を用意しておく。
 
 on:
   push:
@@ -97,7 +97,6 @@ jobs:
             --service-account "${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars "FRONTEND_ORIGIN=${{ vars.FRONTEND_ORIGIN }}" \
             --set-secrets "GEMINI_API_KEY=gemini-api-key:latest" \
-            --set-secrets "GITHUB_TOKEN=github-token:latest" \
             --set-secrets "DATABASE_URL=database-url:latest" \
             --set-secrets "JWT_SECRET=jwt-secret:latest" \
             --set-secrets "ENCRYPTION_KEY=encryption-key:latest" \
@@ -112,8 +111,10 @@ jobs:
         run: |
           set -euo pipefail
           # 起動に失敗したリビジョンを「成功」として通さない。
+          # `/healthz` はCloud Runがインフラ側で横取りしてコンテナに届かないため、
+          # アプリ自身が応答する `/api/v1/health` を叩く。
           curl --fail --retry 5 --retry-delay 5 --retry-all-errors \
-            "${{ steps.deploy.outputs.url }}/healthz"
+            "${{ steps.deploy.outputs.url }}/api/v1/health"
 
   frontend:
     # APIのURLをビルドに焼き込むため、バックエンドの後に実行する。

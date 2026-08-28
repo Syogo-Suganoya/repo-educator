@@ -3,7 +3,6 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.config import settings
 
 TARGET_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rb", ".rs"}
 MAX_TOTAL_CHARS = 60_000
@@ -124,14 +123,10 @@ def parse_repository_url(repository_url: str) -> tuple[str, str]:
 
 
 def _auth_headers(token: str | None) -> dict[str, str]:
-    """呼び出し元が渡したトークンを優先し、なければサーバ共有のPATにフォールバックする。
-
-    未ログインの公開リポジトリ利用では token=None となり、従来通りの挙動になる。
-    """
+    """token=None は未ログイン。未認証で叩くため公開リポジトリのみ、60req/hになる。"""
     headers = {"Accept": "application/vnd.github+json"}
-    effective_token = token or settings.github_token
-    if effective_token:
-        headers["Authorization"] = f"Bearer {effective_token}"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -150,8 +145,6 @@ def _check_response(
     残リクエスト数ヘッダーを見て区別する。
 
     `authenticated` は「利用者自身のトークンで問い合わせたか」を表す。
-    サーバ共有トークン（レートリミット緩和用）でAuthorizationが付いていても、
-    それは利用者の権限ではないため False として扱う。
 
     また、非公開リポジトリは未認証だと404で隠されるため、
     「存在しない」と「権限がない」は応答だけでは区別できない。
@@ -174,8 +167,7 @@ def _check_response(
         raise RepositoryNotFoundError(
             f"{owner}/{repo} not found, or your GitHub token does not grant access to it"
         )
-    # 利用者自身のトークンがない場合。サーバ共有トークンで問い合わせていても、
-    # 「あなたの権限では読めない」ことに変わりはないので、PAT登録へ誘導する。
+    # 利用者自身のトークンがない場合。PAT登録へ誘導する。
     raise RepositoryAccessDeniedError(
         f"{owner}/{repo}@{branch} not found or not accessible without authentication"
     )
@@ -192,7 +184,6 @@ async def fetch_repository_meta(
     前回見た pushed_at と変化がなければ、コミットSHAの問い合わせすら省ける。
     """
     headers = _auth_headers(token)
-    # サーバ共有トークンで付いたAuthorizationは「この利用者の権限」ではない。
     # 案内の分岐は利用者自身がトークンを持っているかで決める。
     authenticated = token is not None
 
@@ -220,7 +211,6 @@ async def resolve_commit_sha(
     変化のないリポジトリへの再訪問ではこの1回も省ける。
     """
     headers = _auth_headers(token)
-    # サーバ共有トークンで付いたAuthorizationは「この利用者の権限」ではない。
     # 案内の分岐は利用者自身がトークンを持っているかで決める。
     authenticated = token is not None
 
@@ -249,7 +239,6 @@ async def fetch_repository_files(
     **キャッシュがミスしたときにだけ呼ぶこと。**
     """
     headers = _auth_headers(token)
-    # サーバ共有トークンで付いたAuthorizationは「この利用者の権限」ではない。
     # 案内の分岐は利用者自身がトークンを持っているかで決める。
     authenticated = token is not None
     owner, repo = ref.owner, ref.repo

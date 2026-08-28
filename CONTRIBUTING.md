@@ -69,7 +69,6 @@ docker compose up --build
 
 | 変数 | 説明 |
 |---|---|
-| `GITHUB_TOKEN` | サーバ共有のGitHub PAT。未ログインでの公開リポジトリ取得に使う。未設定でも動くがレートリミットが厳しくなる（60req/h）。**ユーザー個別のトークンはここには置かない** |
 | `GEMINI_API_KEY` | Geminiの利用に必要。[ai.google.dev](https://aistudio.google.com/apikey) で発行するAPIキー1本。**GCPプロジェクトは不要** |
 | `GEMINI_MODEL` | 使用するGeminiモデル（既定: `gemini-3.5-flash`）。廃止時はここだけ変えればよい |
 | `DATABASE_URL` | PostgreSQLの接続文字列。空ならログイン機能・履歴・解析結果キャッシュがすべて無効になる。ローカルは `docker-compose.yml` の `db` サービスを指す既定値、本番はNeon等に差し替える |
@@ -221,7 +220,7 @@ docker compose exec backend python -m pytest -q
 
 GitHubは**権限不足にもレートリミットにも `403`** を返す。同一視すると、レートリミットなのに「権限がありません」と誤って案内してしまうため、`x-ratelimit-remaining` ヘッダーで区別している（`github_client.py` の `_check_response`）。未認証は60req/hしかなく、実際に到達する。
 
-開発中に `429` が頻発する場合は `.env` に `GITHUB_TOKEN` を設定すると5,000req/hに緩和される。
+開発中に `429` が頻発する場合は、ログインしてアカウント設定からPATを登録する（5,000req/hに緩和される）。
 
 ## 逆引きドキュメント機能
 
@@ -247,8 +246,8 @@ cd frontend && flutter test test/doc_search_test.dart
 
 - **404 "not found"**: ブランチ名の間違いが多い。古いリポジトリは `master` がデフォルト
 - **403 が返る**: プライベートリポジトリに対してログインしていない、またはアカウント設定にGitHubトークンを保存していない。404（存在しない）と403（読めない）は意図的に区別している
-- **`PUT /api/v1/github/token` が400を返す**: 入力したトークンをGitHubが受け付けなかった（無効・失効・タイポ）。`GET /user` での検証に失敗している
-- **429 が返る**: GitHub APIのレートリミット。未認証は60req/hしかないため、開発中に数リポジトリ解析するだけで到達する。ログインしてアカウント設定にトークンを保存すると5,000req/hになる（バックエンド共有の `.env` の `GITHUB_TOKEN` でも同様に緩和できる）。現在の残数は `curl -s https://api.github.com/rate_limit` で確認できる
+- **`POST /api/v1/github/tokens` が400を返す**: 入力したトークンをGitHubが受け付けなかった（無効・失効・タイポ）。`GET /user` での検証に失敗している
+- **429 が返る**: GitHub APIのレートリミット。未認証は60req/hしかないため、開発中に数リポジトリ解析するだけで到達する。ログインしてアカウント設定にトークンを保存すると5,000req/hになる。現在の残数は `curl -s https://api.github.com/rate_limit` で確認できる
 - **同じリポジトリなのに毎回生成される**: `.env` の `DATABASE_URL` が空だとDBキャッシュが効かず、プロセス内メモリキャッシュのみになる。バックエンドを再起動するとメモリキャッシュは消える
 - **リポジトリを更新したのに問題が変わらない**: 対象ブランチのコミットSHAが変わっているか確認する。別ブランチへのpushでは（`pushed_at` は進んでも）意図的に再生成しない
 - **モッククイズ／モックドキュメントしか返らない**: `.env` の `GEMINI_API_KEY` が空。意図的な仕様（上記参照）。`DATABASE_URL` はログイン機能用で、Geminiの動作には関係ない
