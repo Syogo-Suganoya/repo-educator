@@ -73,6 +73,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # GitHubのDeployments画面に反映先を出す。フロントとバックで別環境にして、
+    # どちらまで進んだかがひと目で分かるようにする。
+    environment:
+      name: production-api
+      url: ${{ steps.deploy.outputs.url }}
     outputs:
       url: ${{ steps.deploy.outputs.url }}
     steps:
@@ -123,6 +128,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    environment:
+      name: production
+      url: https://repo-educator.web.app/
     steps:
       - uses: actions/checkout@v4
 

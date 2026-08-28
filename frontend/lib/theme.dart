@@ -196,7 +196,7 @@ class DiffCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (meta != null) meta!,
+                ?meta,
               ],
             ),
           ),
