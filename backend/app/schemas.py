@@ -1,6 +1,7 @@
+import random
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Quiz(BaseModel):
@@ -12,6 +13,27 @@ class Quiz(BaseModel):
     choices: list[str]
     correct_answer: str
     explanation: str
+
+    @model_validator(mode="after")
+    def _spread_correct_answer(self) -> "Quiz":
+        """正解の位置をばらす。
+
+        生成AIも手書きのサンプルも、放っておくと正解を先頭に書いてしまう。
+        そのままでは「1番目を選べば当たる」クイズになり、問題として成立しない。
+
+        並び順は quiz_id から決まるため、同じ問題は何度開いても同じ順になる。
+        キャッシュから返した場合も生成直後と一致する。
+        また、入力の順に左右されないよう、いったん整列してから並べ替える
+        （何度通しても結果が変わらない）。
+
+        採点は選択肢の文字列どうしの比較で行っているため、並べ替えても壊れない。
+        """
+        if len(self.choices) < 2:
+            return self
+        shuffled = sorted(self.choices)
+        random.Random(self.quiz_id).shuffle(shuffled)
+        self.choices = shuffled
+        return self
 
 
 class FeatureSection(BaseModel):
